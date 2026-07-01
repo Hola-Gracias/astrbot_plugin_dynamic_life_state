@@ -1,6 +1,10 @@
 name: astrbot_plugin_dynamic_life_state
 display_name: 动态生活状态
 desc: 为 Bot 生成一天的生活时间线，并在每次对话时注入当前时间段对应的状态。
+<<<<<<< HEAD
 version: v0.1.0
+=======
+version: v1.0.0
+>>>>>>> 8ee30aa3bc0d2156c075f3a315ccefb9859952f9
 author: Hola-Gracias
 repo: https://github.com/Hola-Gracias/astrbot_plugin_dynamic_life_state.git
