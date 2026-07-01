@@ -1,0 +1,62 @@
+{
+    "session_list_mode": {
+        "type": "string",
+        "description": "会话名单模式",
+        "hint": "whitelist=仅列表中的会话启用；blacklist=列表中的会话不启用；none=所有会话启用。",
+        "options": ["whitelist", "blacklist", "none"],
+        "default": "whitelist"
+    },
+    "session_list": {
+        "type": "list",
+        "description": "会话名单列表",
+        "hint": "需填写完整 UMO（如 default:GroupMessage:123456）。可通过 /sid 获取。",
+        "default": [],
+        "items": {
+            "type": "string"
+        }
+    },
+    "generate_time": {
+        "type": "string",
+        "description": "生成时间",
+        "hint": "每日生成动态生活状态的时间 (HH:MM)",
+        "default": "07:00"
+    },
+    "llm_provider_id": {
+        "type": "string",
+        "description": "LLM 模型 ID",
+        "hint": "用于生成动态生活状态的 LLM Provider。留空则使用当前默认模型。",
+        "_special": "select_provider",
+        "default": ""
+    },
+    "persona_id": {
+        "type": "string",
+        "description": "人格设定 ID",
+        "hint": "用于生成动态生活状态的人格设定。留空则使用当前默认人设。",
+        "_special": "select_persona",
+        "default": ""
+    },
+    "injection_mode": {
+        "type": "string",
+        "description": "状态注入方式",
+        "hint": "extra_user_content_parts: 使用临时用户附加上下文，推荐；fake_tool_call: 伪造工具调用注入到对话历史",
+        "default": "extra_user_content_parts",
+        "options": [
+            "extra_user_content_parts",
+            "fake_tool_call"
+        ]
+    },
+    "prompt_template": {
+        "type": "text",
+        "description": "提示词模板",
+        "hint": "用于生成动态生活状态的提示词模板。可使用占位符：{date}、{persona}。",
+        "editor_mode": true,
+        "editor_language": "markdown",
+        "default": "请根据角色设定，生成该角色今天的动态生活状态。\n\n当前日期：{date}\n\n角色设定：\n{persona}\n\n生成要求：\n\n1. 只输出一个可被 JSON 解析的对象，不要输出 Markdown、解释、注释或多余文本。\n2. 内容应符合角色设定，不要与角色身份、性格、生活方式明显冲突。\n3. 生成结果应体现一天中不同时间段的状态变化。\n4. 每个时间段都应包含该时间段的日程和穿搭。\n5. 穿搭应随场景自然变化，例如外出、上课、工作、居家、休息时可以不同。\n6. 日程和穿搭保持简洁自然，不要过度夸张。\n7. timeline 至少包含 3 个时间段，建议包含上午、下午、晚上；需要时可以增加早上、中午、傍晚、深夜或具体时间段。\n8. time 可以使用\"上午\"\"下午\"\"晚上\"\"深夜\"等自然时间段，也可以使用\"08:00-09:00\"这类具体时间段。\n9. timeline 中每一项必须包含 time、schedule、outfit 三个字段。\n10. 可以额外添加 mood、location、note 等字段，但不要省略必需字段。\n\n输出格式必须类似下面的 JSON：\n\n{\n\"date\": \"{date}\",\n\"schedule_summary\": \"今天整体日程的简短描述\",\n\"style_summary\": \"今天整体穿搭或氛围的简短描述\",\n\"timeline\": [\n{\n\"time\": \"上午\",\n\"schedule\": \"这个时间段正在做的事情\",\n\"outfit\": \"这个时间段的穿搭\"\n},\n{\n\"time\": \"下午\",\n\"schedule\": \"这个时间段正在做的事情\",\n\"outfit\": \"这个时间段的穿搭\"\n},\n{\n\"time\": \"晚上\",\n\"schedule\": \"这个时间段正在做的事情\",\n\"outfit\": \"这个时间段的穿搭\"\n}\n]\n}"
+    },
+    "debug_mode": {
+        "type": "bool",
+        "description": "调试模式",
+        "hint": "输出更多日志，便于排查生成、解析和注入问题。",
+        "default": false
+    }
+}

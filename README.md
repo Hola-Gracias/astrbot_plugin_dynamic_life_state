@@ -1,14 +1,97 @@
-# astrbot-plugin-helloworld
+# astrbot_plugin_dynamic_life_state
 
-AstrBot 插件模板 / A template plugin for AstrBot plugin feature
+为 Bot 生成每日动态生活状态时间线，并在每次 LLM 对话时自动注入当前时段对应的状态（全天概况 + 当前时段穿搭与日程）。
 
-> [!NOTE]
-> This repo is just a template of [AstrBot](https://github.com/AstrBotDevs/AstrBot) Plugin.
-> 
-> [AstrBot](https://github.com/AstrBotDevs/AstrBot) is an agentic assistant for both personal and group conversations. It can be deployed across dozens of mainstream instant messaging platforms, including QQ, Telegram, Feishu, DingTalk, Slack, LINE, Discord, Matrix, etc. In addition, it provides a reliable and extensible conversational AI infrastructure for individuals, developers, and teams. Whether you need a personal AI companion, an intelligent customer support agent, an automation assistant, or an enterprise knowledge base, AstrBot enables you to quickly build AI applications directly within your existing messaging workflows.
+## 第一版 (v1.0.0)
 
-# Supports
+### 功能
 
-- [AstrBot Repo](https://github.com/AstrBotDevs/AstrBot)
-- [AstrBot Plugin Development Docs (Chinese)](https://docs.astrbot.app/dev/star/plugin-new.html)
-- [AstrBot Plugin Development Docs (English)](https://docs.astrbot.app/en/dev/star/plugin-new.html)
+- **每日自动生成**：在配置的 `generate_time` 通过 APScheduler 定时调用 LLM 生成当日生活状态 JSON
+- **首次对话懒生成**：如果在生成时间之前触发对话且当日状态不存在，自动触发生成
+- **当前时段匹配**：根据当前时间从 `timeline` 中选中对应时段（支持自然关键词如"上午""下午"和具体区间如 `08:00-09:00`）
+  - 默认时间段映射（左闭右开）：凌晨 0-6、早上 6-9、上午 9-12、中午 12-14、下午 14-18、傍晚 18-20、晚上 20-23、深夜 23-24
+  - 若当前自然时段在 timeline 中缺失，自动构造回退条目：`schedule="空闲"`，穿搭继承最近更早时段
+  - 具体时间区间（如 `12:30-13:30`）覆盖当前时间时优先于自然时段匹配
+- **自动注入**：每次 LLM 请求前将**当前时段**状态注入上下文（含日期、今日概况、今日氛围、当前时段安排与穿搭，不含完整时间线）
+  - `extra_user_content_parts`：以 `<life_state>` 标签追加到用户消息末尾（推荐，不破坏前缀缓存）
+  - `fake_tool_call`：以伪造工具调用消息对注入到对话历史（Gemini 下自动降级）
+- **完整状态查询**：提供 `get_full_dynamic_life_state` LLM Tool，模型可按需查询今日概况、氛围和完整时间线
+- **会话过滤**：支持白名单/黑名单/全启用三种模式（注入和 Tool 均受过滤约束）
+
+### 命令
+
+所有命令均为管理员权限。
+
+| 命令 | 说明 |
+| --- | --- |
+| `/dls show` | 查看当前时段状态（日期、时段、安排、穿搭） |
+| `/dls full` | 查看今日完整状态（概况、氛围、完整时间线） |
+| `/dls regen [额外要求]` | 强制重新生成今日状态，可附加额外要求 |
+
+### 不支持的功能（第一版边界）
+
+- 没有外部 API
+- 没有历史/聊天参考
+- 没有节日/天气集成
+- 没有 session/persona 分区（全局共享一份状态）
+
+### 配置项
+
+| 配置项 | 类型 | 说明 |
+| --- | --- | --- |
+| `session_list_mode` | string | 会话名单模式：whitelist / blacklist / none |
+| `session_list` | list | 会话 UMO 列表 |
+| `generate_time` | string | 每日生成时间 (HH:MM) |
+| `llm_provider_id` | string | 生成用的 LLM Provider（留空走默认） |
+| `persona_id` | string | 生成用的人格设定（留空走默认） |
+| `injection_mode` | string | 注入方式：extra_user_content_parts / fake_tool_call |
+| `prompt_template` | text | 生成 prompt 模板，占位符 `{date}` 和 `{persona}` |
+| `debug_mode` | bool | 调试模式，输出生成 prompt、模型返回、解析结果等 |
+
+### 数据结构
+
+每日生成一份 `life_state.json`，保存在 `plugin_data/astrbot_plugin_dynamic_life_state/`：
+
+```json
+{
+  "2026-06-30": {
+    "date": "2026-06-30",
+    "schedule_summary": "今天整体日程描述",
+    "style_summary": "今天整体穿搭或氛围描述",
+    "timeline": [
+      {"time": "上午", "schedule": "...", "outfit": "..."},
+      {"time": "下午", "schedule": "...", "outfit": "..."},
+      {"time": "晚上", "schedule": "...", "outfit": "..."}
+    ],
+    "status": "ok",
+    "generated_at": "2026-06-30T07:00:00"
+  }
+}
+```
+
+### 时段匹配规则
+
+#### 默认时间段映射（左闭右开）
+
+| 时段 | 区间 |
+|------|------|
+| 凌晨 | 00:00–06:00 |
+| 早上 | 06:00–09:00 |
+| 上午 | 09:00–12:00 |
+| 中午 | 12:00–14:00 |
+| 下午 | 14:00–18:00 |
+| 傍晚 | 18:00–20:00 |
+| 晚上 | 20:00–23:00 |
+| 深夜 | 23:00–24:00 |
+
+- 14:00 属于"下午"，12:00 属于"中午"，以此类推。
+
+#### 时间段选择逻辑
+
+1. **具体时间区间优先**：若 timeline 中存在 `12:30-13:30` 这类具体区间且覆盖当前时间，直接使用。
+2. **自然时段匹配**：若当前自然时段（如"下午"）在 timeline 中存在且覆盖当前时间，使用该条目。
+3. **空缺回退**：若当前自然时段在 timeline 中缺失，构造临时条目：
+   - `time`：当前自然时段名称
+   - `schedule`：`"空闲"`
+   - `outfit`：继承最近一个更早时段的穿搭；若当天没有更早条目，则为空字符串
+4. 合成条目不会修改或持久化原始 `timeline`。
