@@ -2,7 +2,14 @@ import datetime
 import json as _json
 import uuid
 
-from .state import LifeState, TimelineEntry, select_current_slot
+from .state import (
+    BusinessCycle,
+    LifeState,
+    SlotMatch,
+    format_cycle,
+    format_datetime,
+    format_interval,
+)
 
 # fake tool call 常量
 FAKE_TOOL_CALL_NAME = "get_current_life_state"
@@ -16,26 +23,31 @@ FAKE_TOOL_CALL_ID_PREFIX = "fake_dynamic_life_state_"
 
 def build_injection_text(
     state: LifeState,
-    current_entry: TimelineEntry | None = None,
-    now: datetime.datetime | None = None,
+    cycle: BusinessCycle,
+    current_match: SlotMatch | None,
+    now: datetime.datetime,
 ) -> str:
     """构建注入到 LLM 上下文的 <life_state> 文本。"""
-    now = now or datetime.datetime.now()
-
     slot_label = "无"
     schedule_label = "无"
     outfit_label = "无"
-    if current_entry:
-        slot_label = current_entry.time
-        schedule_label = current_entry.schedule
-        outfit_label = current_entry.outfit
+    interval_label = "无"
+    if current_match:
+        slot_label = current_match.entry.time
+        schedule_label = current_match.entry.schedule
+        outfit_label = current_match.entry.outfit
+        if current_match.active_interval:
+            interval_label = format_interval(current_match.active_interval)
 
     return (
         f"<life_state>\n"
-        f"日期: {state.date}\n"
-        f"今日概况: {state.schedule_summary or '无'}\n"
-        f"今日氛围: {state.style_summary or '无'}\n"
+        f"业务日期: {state.business_date}\n"
+        f"状态周期: {format_cycle(cycle)}\n"
+        f"当前自然日期时间: {format_datetime(now)}\n"
+        f"周期概况: {state.schedule_summary or '无'}\n"
+        f"周期氛围: {state.style_summary or '无'}\n"
         f"当前时段: {slot_label}\n"
+        f"当前时段范围: {interval_label}\n"
         f"当前安排: {schedule_label}\n"
         f"当前穿搭: {outfit_label}\n"
         f"</life_state>"
@@ -49,17 +61,25 @@ def build_injection_text(
 
 def build_state_json(
     state: LifeState,
-    current_entry: TimelineEntry | None = None,
+    cycle: BusinessCycle,
+    current_match: SlotMatch | None,
+    now: datetime.datetime,
 ) -> dict:
     """构建状态 JSON，作为 fake tool call 的返回内容。"""
-    entry = current_entry or (
-        select_current_slot(state.timeline) if state.timeline else None
-    )
+    entry = current_match.entry if current_match else None
     return {
-        "date": state.date,
+        "business_date": state.business_date,
+        "cycle_start": cycle.start.isoformat(),
+        "cycle_end": cycle.end.isoformat(),
+        "current_datetime": now.isoformat(),
         "schedule_summary": state.schedule_summary,
         "style_summary": state.style_summary,
         "current_time_slot": entry.time if entry else "",
+        "current_time_interval": (
+            format_interval(current_match.active_interval)
+            if current_match and current_match.active_interval
+            else ""
+        ),
         "current_schedule": entry.schedule if entry else "",
         "current_outfit": entry.outfit if entry else "",
     }
@@ -67,14 +87,16 @@ def build_state_json(
 
 def build_fake_tool_call(
     state: LifeState,
-    current_entry: TimelineEntry | None = None,
+    cycle: BusinessCycle,
+    current_match: SlotMatch | None,
+    now: datetime.datetime,
 ) -> list[dict]:
     """将生活状态格式化为伪造的工具调用消息对（OpenAI 格式）。
 
     Returns:
         [assistant_msg, tool_msg]
     """
-    state_json = build_state_json(state, current_entry)
+    state_json = build_state_json(state, cycle, current_match, now)
     call_id = f"{FAKE_TOOL_CALL_ID_PREFIX}{uuid.uuid4().hex[:12]}"
 
     assistant_msg = {

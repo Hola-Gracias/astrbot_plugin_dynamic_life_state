@@ -2,12 +2,21 @@ import asyncio
 import datetime
 import json
 import re
+from pathlib import Path
 
 from astrbot.api import logger
 from astrbot.core.config.astrbot_config import AstrBotConfig
 from astrbot.core.star.context import Context
 
-from .state import DataManager, LifeState, TimelineEntry
+from .state import (
+    BusinessCycle,
+    DataManager,
+    LifeState,
+    TimelineEntry,
+    is_valid_time_slot,
+)
+
+_SCHEMA_PATH = Path(__file__).resolve().parent.parent / "_conf_schema.json"
 
 
 def _render_template(template: str, **kwargs: str) -> str:
@@ -16,6 +25,15 @@ def _render_template(template: str, **kwargs: str) -> str:
     for key, value in kwargs.items():
         result = result.replace(f"{{{key}}}", value)
     return result
+
+
+def _load_default_prompt_template() -> str:
+    """从配置 schema 读取 prompt_template 的默认值。"""
+    schema = json.loads(_SCHEMA_PATH.read_text(encoding="utf-8"))
+    template = schema.get("prompt_template", {}).get("default")
+    if not isinstance(template, str) or not template.strip():
+        raise ValueError("_conf_schema.json 中缺少有效的 prompt_template.default")
+    return template
 
 
 class Generator:
@@ -34,31 +52,45 @@ class Generator:
     def is_generating(self) -> bool:
         return self._gen_lock.locked()
 
+    def _get_prompt_template(self) -> str:
+        configured = self.config.get("prompt_template", "")
+        if isinstance(configured, str) and configured.strip():
+            return configured
+        logger.warning(
+            "[DynamicLifeState] prompt_template 为空，使用配置 schema 默认提示词"
+        )
+        return _load_default_prompt_template()
+
     async def generate(
         self,
-        date: datetime.datetime | None = None,
+        cycle: BusinessCycle,
         force: bool = False,
         extra: str | None = None,
     ) -> LifeState:
-        """生成并持久化今日生活状态。加锁保护，避免并发打到 LLM。"""
+        """生成并持久化指定业务周期的生活状态。"""
         async with self._gen_lock:
-            date = date or datetime.datetime.now()
-            date_str = date.strftime("%Y-%m-%d")
+            business_date = cycle.business_date.isoformat()
 
             # 二次检查：可能在等锁期间已被另一个任务生成（force 时跳过）
             if not force:
-                existing = self.data_mgr.get(date_str)
+                existing = self.data_mgr.get(business_date)
                 if existing and existing.status == "ok":
                     return existing
 
             debug = bool(self.config.get("debug_mode", False))
 
             try:
-                logger.info(f"[DynamicLifeState] 正在生成 {date_str} 的生活状态...")
+                logger.info(
+                    f"[DynamicLifeState] 正在生成业务日期 {business_date} 的生活状态..."
+                )
 
                 persona = await self._get_persona()
                 prompt = _render_template(
-                    self.config["prompt_template"], date=date_str, persona=persona
+                    self._get_prompt_template(),
+                    business_date=business_date,
+                    cycle_start=cycle.start.isoformat(timespec="minutes"),
+                    cycle_end=cycle.end.isoformat(timespec="minutes"),
+                    persona=persona,
                 )
 
                 extra_text = (extra or "").strip()
@@ -72,7 +104,7 @@ class Generator:
                 if not provider:
                     raise RuntimeError("没有可用的 LLM Provider")
 
-                sid = f"dynamic_life_state_gen_{date_str}"
+                sid = f"dynamic_life_state_gen_{business_date}"
                 resp = await provider.text_chat(prompt, session_id=sid)
                 text = self._extract_completion_text(resp)
 
@@ -80,7 +112,12 @@ class Generator:
                     logger.info(f"[DynamicLifeState] 模型原始返回:\n{text}")
 
                 payload = self._extract_json(text)
-                state = self._validate_and_build(payload, date_str)
+                generated_at = datetime.datetime.now(cycle.start.tzinfo).isoformat()
+                state = self._validate_and_build(
+                    payload,
+                    business_date,
+                    generated_at,
+                )
 
                 self.data_mgr.set(state)
 
@@ -90,15 +127,19 @@ class Generator:
                         f"{json.dumps(self._state_to_dict(state), ensure_ascii=False, indent=2)}"
                     )
 
-                logger.info(f"[DynamicLifeState] {date_str} 生活状态生成成功")
+                logger.info(
+                    f"[DynamicLifeState] 业务日期 {business_date} 生活状态生成成功"
+                )
                 return state
 
             except Exception as e:
-                logger.error(f"[DynamicLifeState] 生成失败 ({date_str}): {e}")
+                logger.error(
+                    f"[DynamicLifeState] 生成失败 (业务日期 {business_date}): {e}"
+                )
                 failed = LifeState(
-                    date=date_str,
+                    business_date=business_date,
                     status="failed",
-                    generated_at=datetime.datetime.now().isoformat(),
+                    generated_at=datetime.datetime.now(cycle.start.tzinfo).isoformat(),
                 )
                 self.data_mgr.set(failed)
                 return failed
@@ -190,14 +231,21 @@ class Generator:
     # ---------- validate ----------
 
     @staticmethod
-    def _validate_and_build(payload: dict | None, date_str: str) -> LifeState:
+    def _validate_and_build(
+        payload: dict | None,
+        business_date: str,
+        generated_at: str,
+    ) -> LifeState:
         if not payload:
             raise ValueError("未能从模型输出中解析出 JSON 对象")
 
         # 基础校验
-        date_val = payload.get("date")
-        if not isinstance(date_val, str) or not date_val:
-            raise ValueError("date 字段缺失或非字符串")
+        business_date_val = payload.get("business_date")
+        if business_date_val != business_date:
+            raise ValueError(
+                "business_date 字段必须与目标业务日期一致: "
+                f"expected={business_date}, actual={business_date_val}"
+            )
 
         timeline_raw = payload.get("timeline")
         if not isinstance(timeline_raw, list) or len(timeline_raw) == 0:
@@ -212,6 +260,8 @@ class Generator:
             outfit_val = item.get("outfit")
             if not time_val or not schedule_val or not outfit_val:
                 continue
+            if not is_valid_time_slot(str(time_val)):
+                continue
             entries.append(
                 TimelineEntry(
                     time=str(time_val),
@@ -222,22 +272,22 @@ class Generator:
 
         if not entries:
             raise ValueError(
-                "timeline 中没有有效条目（每项至少需要 time/schedule/outfit）"
+                "timeline 中没有有效条目（每项需要可解析的 time 以及 schedule/outfit）"
             )
 
         return LifeState(
-            date=date_str,
+            business_date=business_date,
             schedule_summary=str(payload.get("schedule_summary", "")),
             style_summary=str(payload.get("style_summary", "")),
             timeline=entries,
             status="ok",
-            generated_at=datetime.datetime.now().isoformat(),
+            generated_at=generated_at,
         )
 
     @staticmethod
     def _state_to_dict(state: LifeState) -> dict:
         return {
-            "date": state.date,
+            "business_date": state.business_date,
             "schedule_summary": state.schedule_summary,
             "style_summary": state.style_summary,
             "timeline": [
