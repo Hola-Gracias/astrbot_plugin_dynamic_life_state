@@ -73,7 +73,7 @@ class Generator:
 
             # 二次检查：可能在等锁期间已被另一个任务生成（force 时跳过）
             if not force:
-                existing = self.data_mgr.get(business_date)
+                existing = self.data_mgr.get_by_cycle(cycle)
                 if existing and existing.status == "ok":
                     return existing
 
@@ -115,7 +115,7 @@ class Generator:
                 generated_at = datetime.datetime.now(cycle.start.tzinfo).isoformat()
                 state = self._validate_and_build(
                     payload,
-                    business_date,
+                    cycle,
                     generated_at,
                 )
 
@@ -136,8 +136,8 @@ class Generator:
                 logger.error(
                     f"[DynamicLifeState] 生成失败 (业务日期 {business_date}): {e}"
                 )
-                failed = LifeState(
-                    business_date=business_date,
+                failed = LifeState.from_cycle(
+                    cycle,
                     status="failed",
                     generated_at=datetime.datetime.now(cycle.start.tzinfo).isoformat(),
                 )
@@ -233,13 +233,14 @@ class Generator:
     @staticmethod
     def _validate_and_build(
         payload: dict | None,
-        business_date: str,
+        cycle: BusinessCycle,
         generated_at: str,
     ) -> LifeState:
         if not payload:
             raise ValueError("未能从模型输出中解析出 JSON 对象")
 
         # 基础校验
+        business_date = cycle.business_date.isoformat()
         business_date_val = payload.get("business_date")
         if business_date_val != business_date:
             raise ValueError(
@@ -275,8 +276,8 @@ class Generator:
                 "timeline 中没有有效条目（每项需要可解析的 time 以及 schedule/outfit）"
             )
 
-        return LifeState(
-            business_date=business_date,
+        return LifeState.from_cycle(
+            cycle,
             schedule_summary=str(payload.get("schedule_summary", "")),
             style_summary=str(payload.get("style_summary", "")),
             timeline=entries,
@@ -288,6 +289,9 @@ class Generator:
     def _state_to_dict(state: LifeState) -> dict:
         return {
             "business_date": state.business_date,
+            "cycle_start": state.cycle_start,
+            "cycle_end": state.cycle_end,
+            "timezone": state.timezone,
             "schedule_summary": state.schedule_summary,
             "style_summary": state.style_summary,
             "timeline": [

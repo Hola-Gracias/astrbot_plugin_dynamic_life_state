@@ -64,7 +64,7 @@ class DynamicLifeStatePlugin(Star):
     async def initialize(self):
         self.timezone = self._resolve_timezone()
         self.generate_time = self._resolve_generate_time()
-        self.data_mgr = DataManager(self.state_file)
+        self.data_mgr = DataManager(self.state_file, self._cycle_for_date)
         self.generator = Generator(self.context, self.config, self.data_mgr)
         self._start_scheduler()
 
@@ -119,6 +119,29 @@ class DynamicLifeStatePlugin(Star):
             self.timezone,
         )
 
+    def _find_active_state(
+        self,
+        now: datetime.datetime,
+    ) -> tuple[LifeState, BusinessCycle] | None:
+        state = self.data_mgr.find_active(now)
+        if state is None:
+            return None
+        return state, state.to_cycle()
+
+    def _select_current_state(
+        self,
+        now: datetime.datetime,
+    ) -> tuple[LifeState | None, BusinessCycle]:
+        """选择起点最新的已存周期，或返回需要生成的配置周期。"""
+        configured_cycle = self._current_cycle(now)
+        active = self._find_active_state(now)
+        if active is None:
+            return None, configured_cycle
+        state, frozen_cycle = active
+        if frozen_cycle.start < configured_cycle.start:
+            return None, configured_cycle
+        return state, frozen_cycle
+
     def _start_scheduler(self):
         try:
             boundary_time = parse_generate_time(self.generate_time)
@@ -156,12 +179,11 @@ class DynamicLifeStatePlugin(Star):
     async def _daily_generate(self):
         """每日定时生成任务。"""
         now = self._now()
-        cycle = self._current_cycle(now)
-        business_date = cycle.business_date.isoformat()
-        data = self.data_mgr.get(business_date)
-        if data and data.status == "ok":
+        data, cycle = self._select_current_state(now)
+        if data:
             logger.info(
-                f"[DynamicLifeState] 业务日期 {business_date} 已有有效状态，跳过生成"
+                f"[DynamicLifeState] 当前有效状态已属于最新周期 "
+                f"{format_cycle(cycle)}，跳过生成"
             )
             return
         await self.generator.generate(cycle)
@@ -179,18 +201,16 @@ class DynamicLifeStatePlugin(Star):
             return
 
         now = self._now()
-        cycle = self._current_cycle(now)
-        business_date = cycle.business_date.isoformat()
-
-        # 懒生成（数据不存在或上次生成失败时触发）
-        data = self.data_mgr.get(business_date)
-        if not data or data.status == "failed":
+        data, cycle = self._select_current_state(now)
+        if data is None:
             if self.generator.is_generating:
                 return  # 已有生成任务在跑，本轮跳过
             data = await self.generator.generate(cycle)
 
         if not data or data.status == "failed":
             return
+
+        business_date = data.business_date
 
         # 选择当前时段
         current_match = select_current_slot(data.timeline, cycle, now)
@@ -307,16 +327,19 @@ class DynamicLifeStatePlugin(Star):
             except ValueError:
                 return "日期格式错误，请使用 YYYY-MM-DD 格式，例如 2026-07-01。"
             target_str = date
-            cycle = self._cycle_for_date(target_str)
+            data = self.data_mgr.get_latest_for_business_date(target_str)
         else:
-            cycle = self._current_cycle(now)
-            target_str = cycle.business_date.isoformat()
+            data, cycle = self._select_current_state(now)
+            if data is None:
+                return "当前时间没有已生成的生活状态。"
+            target_str = data.business_date
 
-        data = self.data_mgr.get(target_str)
         if not data:
             return f"{target_str} 的生活状态尚未生成。"
         if data.status == "failed":
             return f"{target_str} 的生活状态生成失败。"
+        if date:
+            cycle = data.to_cycle()
 
         return self._format_full_state(data, cycle)
 
@@ -422,15 +445,13 @@ class DynamicLifeStatePlugin(Star):
                 return
 
         now = self._now()
-        cycle = self._current_cycle(now)
-        business_date = cycle.business_date.isoformat()
 
         if self.generator.is_generating:
             yield event.plain_result("状态正在生成中，请稍后再试。")
             return
 
-        data = self.data_mgr.get(business_date)
-        if not data or data.status == "failed":
+        data, cycle = self._select_current_state(now)
+        if data is None:
             yield event.plain_result("当前业务周期状态尚未生成，正在生成...")
             data = await self.generator.generate(cycle)
 
@@ -495,8 +516,6 @@ class DynamicLifeStatePlugin(Star):
     async def dls_full(self, event: AstrMessageEvent, date: str = ""):
         """查看今日或指定日期的完整状态。"""
         now = self._now()
-        current_cycle = self._current_cycle(now)
-        current_business_date = current_cycle.business_date.isoformat()
 
         if date:
             date = date.strip()
@@ -505,37 +524,30 @@ class DynamicLifeStatePlugin(Star):
             except ValueError:
                 yield event.plain_result("日期格式错误，请使用 YYYY-MM-DD 格式。")
                 return
-            target_str = date
-        else:
-            target_str = current_business_date
-
-        # 当前业务日期：保留懒生成行为
-        if target_str == current_business_date:
-            cycle = current_cycle
-            data = self.data_mgr.get(target_str)
+            data = self.data_mgr.get_latest_for_business_date(date)
             if not data:
-                if self.generator.is_generating:
-                    yield event.plain_result("状态正在生成中，请稍后再试。")
-                    return
-                yield event.plain_result("当前业务周期状态尚未生成，正在生成...")
-                data = await self.generator.generate(cycle)
-
-            if not data or data.status == "failed":
-                yield event.plain_result("今日暂无有效状态。")
-                return
-
-            yield event.plain_result(self._format_full_state(data, cycle))
-        else:
-            cycle = self._cycle_for_date(target_str)
-            data = self.data_mgr.get(target_str)
-            if not data:
-                yield event.plain_result(f"{target_str} 的状态不存在。")
+                yield event.plain_result(f"{date} 的状态不存在。")
                 return
             if data.status == "failed":
-                yield event.plain_result(f"{target_str} 的状态生成失败，无有效状态。")
+                yield event.plain_result(f"{date} 的状态生成失败，无有效状态。")
                 return
-
+            cycle = data.to_cycle()
             yield event.plain_result(self._format_full_state(data, cycle))
+            return
+
+        data, cycle = self._select_current_state(now)
+        if data is None:
+            if self.generator.is_generating:
+                yield event.plain_result("状态正在生成中，请稍后再试。")
+                return
+            yield event.plain_result("当前业务周期状态尚未生成，正在生成...")
+            data = await self.generator.generate(cycle)
+
+        if not data or data.status == "failed":
+            yield event.plain_result("当前暂无有效状态。")
+            return
+
+        yield event.plain_result(self._format_full_state(data, cycle))
 
     @dls.command("regen")
     @filter.permission_type(filter.PermissionType.ADMIN)
@@ -549,7 +561,7 @@ class DynamicLifeStatePlugin(Star):
         extra = _extract_args_after(event.message_str, "dls regen")
 
         now = self._now()
-        cycle = self._current_cycle(now)
+        _, cycle = self._select_current_state(now)
 
         if extra:
             yield event.plain_result(f"正在根据附加要求重新生成今日状态：{extra}")
