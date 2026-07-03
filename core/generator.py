@@ -22,10 +22,11 @@ _SCHEMA_PATH = Path(__file__).resolve().parent.parent / "_conf_schema.json"
 
 def _render_template(template: str, **kwargs: str) -> str:
     """安全渲染模板：只替换已知占位符，其他花括号原样保留。"""
-    result = template
-    for key, value in kwargs.items():
-        result = result.replace(f"{{{key}}}", value)
-    return result
+    return re.sub(
+        r"\{([A-Za-z_][A-Za-z0-9_]*)\}",
+        lambda match: kwargs.get(match.group(1), match.group(0)),
+        template,
+    )
 
 
 def _load_default_prompt_template() -> str:
@@ -129,6 +130,18 @@ class Generator:
                 history_text = self._format_history(history_states)
                 extra_text = (extra or "").strip() or "无"
 
+            except Exception as e:
+                logger.error(
+                    f"[DynamicLifeState] 生成准备失败，保留现有状态 "
+                    f"(业务日期 {business_date}): {e}"
+                )
+                return LifeState.from_cycle(
+                    cycle,
+                    status="failed",
+                    generated_at=datetime.datetime.now(cycle.start.tzinfo).isoformat(),
+                )
+
+            try:
                 persona = await self._get_persona()
                 prompt = _render_template(
                     self._get_prompt_template(),
@@ -162,19 +175,6 @@ class Generator:
                     generated_at,
                 )
 
-                self.data_mgr.set(state)
-
-                if debug:
-                    logger.info(
-                        f"[DynamicLifeState] 解析后的状态:\n"
-                        f"{json.dumps(self._state_to_dict(state), ensure_ascii=False, indent=2)}"
-                    )
-
-                logger.info(
-                    f"[DynamicLifeState] 业务日期 {business_date} 生活状态生成成功"
-                )
-                return state
-
             except Exception as e:
                 logger.error(
                     f"[DynamicLifeState] 生成失败 (业务日期 {business_date}): {e}"
@@ -184,8 +184,36 @@ class Generator:
                     status="failed",
                     generated_at=datetime.datetime.now(cycle.start.tzinfo).isoformat(),
                 )
-                self.data_mgr.set(failed)
+                try:
+                    self.data_mgr.set(failed)
+                except Exception as save_error:
+                    logger.error(
+                        f"[DynamicLifeState] 失败状态保存失败 "
+                        f"(业务日期 {business_date}): {save_error}"
+                    )
                 return failed
+
+            try:
+                self.data_mgr.set(state)
+            except Exception as e:
+                logger.error(
+                    f"[DynamicLifeState] 生成结果保存失败 "
+                    f"(业务日期 {business_date}): {e}"
+                )
+                return LifeState.from_cycle(
+                    cycle,
+                    status="failed",
+                    generated_at=datetime.datetime.now(cycle.start.tzinfo).isoformat(),
+                )
+
+            if debug:
+                logger.info(
+                    f"[DynamicLifeState] 解析后的状态:\n"
+                    f"{json.dumps(self._state_to_dict(state), ensure_ascii=False, indent=2)}"
+                )
+
+            logger.info(f"[DynamicLifeState] 业务日期 {business_date} 生活状态生成成功")
+            return state
 
     # ---------- persona ----------
 

@@ -6,6 +6,8 @@ from collections.abc import Callable
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
 
+from astrbot.api import logger
+
 DEFAULT_GENERATE_TIME = "07:00"
 
 # =========================
@@ -250,9 +252,17 @@ class DataManager:
             archived_keys.append(cycle_key)
 
         if archived_keys:
-            for cycle_key in archived_keys:
-                del self._data[cycle_key]
-            self.save()
+            previous_data = self._data
+            self._data = {
+                cycle_key: state
+                for cycle_key, state in self._data.items()
+                if cycle_key not in archived_keys
+            }
+            try:
+                self.save()
+            except Exception:
+                self._data = previous_data
+                raise
 
         self._prune_history()
 
@@ -312,14 +322,33 @@ class DataManager:
         return states
 
     def set(self, state: LifeState) -> None:
+        """Persist the state as the only current business cycle.
+
+        Args:
+            state: State to persist as the current business cycle.
+
+        Raises:
+            ValueError: The state contains an invalid business cycle.
+            OSError: The current state file cannot be written.
+        """
         cycle = state.to_cycle()
         cycle_key = self._cycle_key(cycle)
+        previous_data = self._data
         self._data = {cycle_key: state}
-        self.save()
+        try:
+            self.save()
+        except Exception:
+            self._data = previous_data
+            raise
 
         history_path = self._history_path(state.business_date)
         if history_path.exists():
-            history_path.unlink()
+            try:
+                history_path.unlink()
+            except OSError as e:
+                logger.warning(
+                    f"[DynamicLifeState] 无法删除同业务日期历史文件 {history_path}: {e}"
+                )
 
     @staticmethod
     def _history_filename(business_date: datetime.date) -> str:
@@ -330,6 +359,7 @@ class DataManager:
         return self._history_dir / self._history_filename(parsed)
 
     def _prune_history(self) -> None:
+        """Remove invalid files and retain the newest seven history states."""
         if not self._history_dir.exists():
             return
 
@@ -343,6 +373,14 @@ class DataManager:
                     match.group(1), "%Y.%m.%d"
                 ).date()
             except ValueError:
+                continue
+            history_data, _ = self._load_path(path)
+            if (
+                len(history_data) != 1
+                or next(iter(history_data.values())).business_date
+                != file_date.isoformat()
+            ):
+                path.unlink()
                 continue
             history_files.append((file_date, path))
 
