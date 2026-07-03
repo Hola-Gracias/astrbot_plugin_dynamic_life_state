@@ -10,16 +10,27 @@
         "type": "list",
         "description": "会话名单列表",
         "hint": "需填写完整 UMO（如 default:GroupMessage:123456）。可通过 /sid 获取。",
-        "default": [],
         "items": {
             "type": "string"
-        }
+        },
+        "default": []
     },
     "generate_time": {
         "type": "string",
         "description": "业务周期边界与生成时间",
         "hint": "使用 HH:MM。已生成状态的周期不会被重新解释；新配置周期开始后会生成新状态，并替换同一业务日期的旧状态。",
         "default": "07:00"
+    },
+    "history_reference_days": {
+        "type": "int",
+        "description": "历史状态参考天数",
+        "hint": "生成时可参考的历史状态天数。设为 0 时则不参考历史日程。",
+        "slider": {
+            "min": 0,
+            "max": 7,
+            "step": 1
+        },
+        "default": 3
     },
     "llm_provider_id": {
         "type": "string",
@@ -39,19 +50,19 @@
         "type": "string",
         "description": "状态注入方式",
         "hint": "extra_user_content_parts: 使用临时用户附加上下文，推荐；fake_tool_call: 伪造工具调用注入到对话历史",
-        "default": "extra_user_content_parts",
         "options": [
             "extra_user_content_parts",
             "fake_tool_call"
-        ]
+        ],
+        "default": "extra_user_content_parts"
     },
     "prompt_template": {
         "type": "text",
         "description": "提示词模板",
-        "hint": "用于生成动态生活状态的提示词模板。内容为空时使用默认提示词。可使用占位符：{business_date}、{cycle_start}、{cycle_end}、{persona}。",
+        "hint": "用于生成动态生活状态的提示词模板。内容为空时使用默认提示词。可使用占位符：{business_date}、{cycle_start}、{cycle_end}、{persona}、{history_states}、{extra_requirements}。",
         "editor_mode": true,
         "editor_language": "markdown",
-        "default": "请根据角色设定，生成该角色在指定业务周期内的动态生活状态。\n\n业务日期：{business_date}\n业务周期：{cycle_start} <= time < {cycle_end}\n\n角色设定：\n{persona}\n\n自然时段按所在地自然日期解释；例如周期从 07:00 开始时，业务日期当天之后的\"凌晨\"是次日 00:00-06:00。自然时段条目只对应业务周期内按时间排序的第一个有效片段；被周期边界切到周期尾部的同名残余片段视为缺失，不复用该条目。如需精确安排周期尾部，请使用具体时间区间（如\"06:00-07:00\"）覆盖。\n\n自然时段参考映射（左闭右开）：\n凌晨：00:00-06:00\n早上：06:00-09:00\n上午：09:00-12:00\n中午：12:00-14:00\n下午：14:00-18:00\n傍晚：18:00-20:00\n晚上：20:00-23:00\n深夜：23:00-24:00\n\n生成要求：\n\n1. 只输出一个可被 JSON 解析的对象，不要输出 Markdown、解释、注释或多余文本。\n2. business_date 必须严格等于 \"{business_date}\"。\n3. 内容应符合角色设定，不要与角色身份、性格、生活方式明显冲突。\n4. 生成结果应体现业务周期内不同时间段的状态变化，无需描述变化过程。\n5. 每个时间段都应包含该时间段的日程和穿搭。\n6. 日程和穿搭保持简洁自然，不要过度夸张。\n7. timeline 至少包含 3 个时间段，建议包含上午、下午、晚上；需要时可以增加凌晨、早上、中午、傍晚、深夜或具体时间段。\n8. time 可以使用\"凌晨\"\"早上\"\"上午\"\"中午\"\"下午\"\"傍晚\"\"晚上\"\"深夜\"，也可以使用\"08:00-09:00\"或\"23:00-01:00\"这类具体时间段。\n9. timeline 中每一项必须包含 time、schedule、outfit 三个字段。\n10. 可以额外添加 mood、location、note 等字段，但不要省略必需字段。\n\n输出格式必须类似下面的 JSON：\n\n{\n\"business_date\": \"{business_date}\",\n\"schedule_summary\": \"该业务周期整体日程的简短描述\",\n\"style_summary\": \"该业务周期整体穿搭或氛围的简短描述\",\n\"timeline\": [\n{\n\"time\": \"上午\",\n\"schedule\": \"这个时间段正在做的事情\",\n\"outfit\": \"这个时间段的穿搭\"\n},\n{\n\"time\": \"下午\",\n\"schedule\": \"这个时间段正在做的事情\",\n\"outfit\": \"这个时间段的穿搭\"\n},\n{\n\"time\": \"晚上\",\n\"schedule\": \"这个时间段正在做的事情\",\n\"outfit\": \"这个时间段的穿搭\"\n}\n]\n}"
+        "default": "请根据角色设定，生成该角色在指定业务周期内的动态生活状态。\n\n业务日期：{business_date}\n业务周期：{cycle_start} <= time < {cycle_end}\n\n角色设定：\n{persona}\n\n自然时段按所在地自然日期解释；例如周期从 07:00 开始时，业务日期当天之后的\"凌晨\"是次日 00:00-06:00。\n自然时段条目只对应业务周期内按时间排序的第一个有效片段，如需精确安排周期尾部，请使用具体时间区间（如\"06:00-07:00\"）覆盖。\n\n自然时段参考映射（左闭右开）：\n凌晨：00:00-06:00\n早上：06:00-09:00\n上午：09:00-12:00\n中午：12:00-14:00\n下午：14:00-18:00\n傍晚：18:00-20:00\n晚上：20:00-23:00\n深夜：23:00-24:00\n\n生成要求：\n\n1. 只输出一个可被 JSON 解析的对象，不要输出 Markdown、解释、注释或多余文本。\n2. business_date 必须严格等于 \"{business_date}\"。\n3. 内容应符合角色设定，不要与角色身份、性格、生活方式明显冲突。\n4. 生成结果应体现业务周期内不同时间段的状态变化，无需描述变化过程。\n5. 每个时间段都应包含该时间段的日程和穿搭，不做过渡描述。\n6. 日程和穿搭保持简洁自然，不要过度夸张。\n7. timeline 至少包含 3 个时间段，建议包含上午、下午、晚上；需要时可以增加凌晨、早上、中午、傍晚、深夜或具体时间段。\n8. time 可以使用\"凌晨\"\"早上\"\"上午\"\"中午\"\"下午\"\"傍晚\"\"晚上\"\"深夜\"，也可以使用\"08:00-09:00\"或\"23:00-01:00\"这类具体时间段。\n9. timeline 中每一项必须包含 time、schedule、outfit 三个字段。\n10. 可以额外添加 mood、location、note 等字段，但不要省略必需字段。\n\n输出格式必须类似下面的 JSON：\n\n{\n\"business_date\": \"{business_date}\",\n\"schedule_summary\": \"该业务周期整体日程的简短描述\",\n\"style_summary\": \"该业务周期整体穿搭或氛围的简短描述\",\n\"timeline\": [\n{\n\"time\": \"上午\",\n\"schedule\": \"这个时间段正在做的事情\",\n\"outfit\": \"这个时间段的穿搭\"\n},\n{\n\"time\": \"下午\",\n\"schedule\": \"这个时间段正在做的事情\",\n\"outfit\": \"这个时间段的穿搭\"\n},\n{\n\"time\": \"晚上\",\n\"schedule\": \"这个时间段正在做的事情\",\n\"outfit\": \"这个时间段的穿搭\"\n}\n]\n}\n\n历史状态：\n{history_states}\n\n额外要求：\n{extra_requirements}"
     },
     "debug_mode": {
         "type": "bool",

@@ -147,6 +147,7 @@ def format_cycle(cycle: BusinessCycle) -> str:
 # =========================
 
 MAX_HISTORY_DAYS = 7
+_HISTORY_FILE_RE = re.compile(r"life_state_(\d{4}\.\d{2}\.\d{2})\.json")
 
 
 class DataManager:
@@ -156,6 +157,7 @@ class DataManager:
         legacy_cycle_resolver: Callable[[str], BusinessCycle] | None = None,
     ):
         self._path = json_path
+        self._history_dir = json_path.parent / "history"
         self._legacy_cycle_resolver = legacy_cycle_resolver
         self._data: dict[str, LifeState] = {}
         self.load()
@@ -194,6 +196,22 @@ class DataManager:
             except (ValueError, zoneinfo.ZoneInfoNotFoundError):
                 continue
             candidates.append((cycle.start, state))
+
+        if not candidates:
+            try:
+                history_path = self._history_path(date_str)
+            except ValueError:
+                return []
+            history_data, _ = self._load_path(history_path)
+            for state in history_data.values():
+                if state.business_date != date_str:
+                    continue
+                try:
+                    cycle = state.to_cycle()
+                except (ValueError, zoneinfo.ZoneInfoNotFoundError):
+                    continue
+                candidates.append((cycle.start, state))
+
         candidates.sort(key=lambda item: item[0])
         return [state for _, state in candidates]
 
@@ -201,48 +219,160 @@ class DataManager:
         states = self.get_by_business_date(date_str)
         return states[-1] if states else None
 
+    def archive_before_generation(self, business_date: str) -> None:
+        """归档目标业务日期之外的当前状态。
+
+        Args:
+            business_date: 即将生成状态的业务日期，格式为 YYYY-MM-DD。
+
+        Raises:
+            ValueError: 业务日期格式无效时抛出。
+            OSError: 历史状态或当前状态写入失败时抛出。
+        """
+        datetime.date.fromisoformat(business_date)
+        archived_keys: list[str] = []
+
+        for cycle_key, state in self._data.items():
+            if state.business_date == business_date:
+                continue
+
+            history_path = self._history_path(state.business_date)
+            history_path.parent.mkdir(parents=True, exist_ok=True)
+            state_dict = asdict(state)
+            state_dict["timeline"] = [asdict(entry) for entry in state.timeline]
+            payload = {cycle_key: state_dict}
+            tmp_path = history_path.with_suffix(".json.tmp")
+            tmp_path.write_text(
+                json.dumps(payload, ensure_ascii=False, indent=2),
+                encoding="utf-8",
+            )
+            tmp_path.replace(history_path)
+            archived_keys.append(cycle_key)
+
+        if archived_keys:
+            for cycle_key in archived_keys:
+                del self._data[cycle_key]
+            self.save()
+
+        self._prune_history()
+
+    def get_recent_history(
+        self,
+        before_business_date: str,
+        limit: int,
+    ) -> list[LifeState]:
+        """返回指定业务日期之前最近的成功历史状态。
+
+        Args:
+            before_business_date: 历史状态必须早于该业务日期。
+            limit: 最多返回的历史业务周期数。
+
+        Returns:
+            按业务日期从新到旧排列的成功历史状态。
+
+        Raises:
+            ValueError: 业务日期格式无效时抛出。
+        """
+        before_date = datetime.date.fromisoformat(before_business_date)
+        if limit <= 0 or not self._history_dir.exists():
+            return []
+
+        history_files: list[tuple[datetime.date, Path]] = []
+        for path in self._history_dir.iterdir():
+            match = _HISTORY_FILE_RE.fullmatch(path.name)
+            if not match:
+                continue
+            try:
+                file_date = datetime.datetime.strptime(
+                    match.group(1), "%Y.%m.%d"
+                ).date()
+            except ValueError:
+                continue
+            if file_date < before_date:
+                history_files.append((file_date, path))
+
+        states: list[LifeState] = []
+        for file_date, path in sorted(history_files, reverse=True):
+            history_data, _ = self._load_path(path)
+            candidates: list[tuple[datetime.datetime, LifeState]] = []
+            expected_date = file_date.isoformat()
+            for state in history_data.values():
+                if state.business_date != expected_date or state.status != "ok":
+                    continue
+                try:
+                    cycle = state.to_cycle()
+                except (ValueError, zoneinfo.ZoneInfoNotFoundError):
+                    continue
+                candidates.append((cycle.start, state))
+            if candidates:
+                states.append(max(candidates, key=lambda item: item[0])[1])
+            if len(states) >= limit:
+                break
+
+        return states
+
     def set(self, state: LifeState) -> None:
         cycle = state.to_cycle()
         cycle_key = self._cycle_key(cycle)
-        replaced = [
-            key
-            for key, existing in self._data.items()
-            if existing.business_date == state.business_date and key != cycle_key
-        ]
-        for key in replaced:
-            del self._data[key]
-        self._data[cycle_key] = state
+        self._data = {cycle_key: state}
         self.save()
 
-    def _prune_old(self):
-        """仅保留最近七个业务日期的状态。"""
-        business_dates = sorted(
-            {state.business_date for state in self._data.values()},
-            reverse=True,
-        )
-        if len(business_dates) <= MAX_HISTORY_DAYS:
-            return
-        keep_dates = set(business_dates[:MAX_HISTORY_DAYS])
-        removed = [
-            key
-            for key, state in self._data.items()
-            if state.business_date not in keep_dates
-        ]
-        for key in removed:
-            del self._data[key]
+        history_path = self._history_path(state.business_date)
+        if history_path.exists():
+            history_path.unlink()
 
-    def load(self) -> None:
-        if not self._path.exists():
-            self._data.clear()
+    @staticmethod
+    def _history_filename(business_date: datetime.date) -> str:
+        return f"life_state_{business_date.strftime('%Y.%m.%d')}.json"
+
+    def _history_path(self, business_date: str) -> Path:
+        parsed = datetime.date.fromisoformat(business_date)
+        return self._history_dir / self._history_filename(parsed)
+
+    def _prune_history(self) -> None:
+        if not self._history_dir.exists():
             return
+
+        history_files: list[tuple[datetime.date, Path]] = []
+        for path in self._history_dir.iterdir():
+            match = _HISTORY_FILE_RE.fullmatch(path.name)
+            if not match:
+                continue
+            try:
+                file_date = datetime.datetime.strptime(
+                    match.group(1), "%Y.%m.%d"
+                ).date()
+            except ValueError:
+                continue
+            history_files.append((file_date, path))
+
+        for _, path in sorted(history_files, reverse=True)[MAX_HISTORY_DAYS:]:
+            path.unlink()
+
+    def _load_path(
+        self,
+        path: Path,
+        *,
+        allow_legacy: bool = False,
+    ) -> tuple[dict[str, LifeState], bool]:
+        """读取并规范化单个状态文件。
+
+        Args:
+            path: 要读取的状态文件。
+            allow_legacy: 是否允许补齐旧版缺少周期字段的数据。
+
+        Returns:
+            规范化后的状态映射，以及是否需要重写源文件。
+        """
+        if not path.exists():
+            return {}, False
         try:
-            raw = json.loads(self._path.read_text(encoding="utf-8"))
+            raw = json.loads(path.read_text(encoding="utf-8"))
         except Exception:
-            self._data.clear()
-            return
+            return {}, False
         if not isinstance(raw, dict):
-            self._data.clear()
-            return
+            return {}, False
+
         data: dict[str, LifeState] = {}
         migrated = False
         for cycle_key, item in raw.items():
@@ -255,7 +385,8 @@ class DataManager:
                 else:
                     business_date = item.get("business_date")
                     if (
-                        not isinstance(business_date, str)
+                        not allow_legacy
+                        or not isinstance(business_date, str)
                         or self._legacy_cycle_resolver is None
                     ):
                         continue
@@ -284,6 +415,7 @@ class DataManager:
                 data[resolved_key] = state
             except Exception:
                 continue
+
         deduplicated: dict[str, LifeState] = {}
         for cycle_key, state in sorted(
             data.items(),
@@ -302,12 +434,14 @@ class DataManager:
             deduplicated[cycle_key] = state
 
         rewritten = migrated or len(deduplicated) != len(data)
-        self._data = deduplicated
+        return deduplicated, rewritten
+
+    def load(self) -> None:
+        self._data, rewritten = self._load_path(self._path, allow_legacy=True)
         if rewritten:
             self.save()
 
     def save(self) -> None:
-        self._prune_old()
         self._path.parent.mkdir(parents=True, exist_ok=True)
         tmp_path = self._path.with_suffix(".tmp")
         payload = {}

@@ -9,6 +9,7 @@ from astrbot.core.config.astrbot_config import AstrBotConfig
 from astrbot.core.star.context import Context
 
 from .state import (
+    MAX_HISTORY_DAYS,
     BusinessCycle,
     DataManager,
     LifeState,
@@ -61,6 +62,37 @@ class Generator:
         )
         return _load_default_prompt_template()
 
+    @staticmethod
+    def _format_history(states: list[LifeState]) -> str:
+        """将历史状态渲染为生成提示词使用的文本。
+
+        Args:
+            states: 按业务日期从新到旧排列的历史状态。
+
+        Returns:
+            包含日程、穿搭和时间线的历史状态文本；无状态时返回“无”。
+        """
+        if not states:
+            return "无"
+
+        sections: list[str] = []
+        for state in states:
+            lines = [
+                f"[{state.business_date}]",
+                f"整体日程：{state.schedule_summary or '无'}",
+                f"穿搭风格：{state.style_summary or '无'}",
+                "时间线：",
+            ]
+            for entry in state.timeline:
+                lines.extend(
+                    [
+                        f"- {entry.time}：{entry.schedule or '无'}",
+                        f"  - 穿搭：{entry.outfit or '无'}",
+                    ]
+                )
+            sections.append("\n".join(lines))
+        return "\n\n".join(sections)
+
     async def generate(
         self,
         cycle: BusinessCycle,
@@ -84,6 +116,19 @@ class Generator:
                     f"[DynamicLifeState] 正在生成业务日期 {business_date} 的生活状态..."
                 )
 
+                self.data_mgr.archive_before_generation(business_date)
+                try:
+                    history_days = int(self.config.get("history_reference_days", 3))
+                except (TypeError, ValueError):
+                    history_days = 3
+                history_days = max(0, min(history_days, MAX_HISTORY_DAYS))
+                history_states = self.data_mgr.get_recent_history(
+                    business_date,
+                    history_days,
+                )
+                history_text = self._format_history(history_states)
+                extra_text = (extra or "").strip() or "无"
+
                 persona = await self._get_persona()
                 prompt = _render_template(
                     self._get_prompt_template(),
@@ -91,11 +136,9 @@ class Generator:
                     cycle_start=cycle.start.isoformat(timespec="minutes"),
                     cycle_end=cycle.end.isoformat(timespec="minutes"),
                     persona=persona,
+                    history_states=history_text,
+                    extra_requirements=extra_text,
                 )
-
-                extra_text = (extra or "").strip()
-                if extra_text:
-                    prompt += f"\n\n额外生成要求：\n{extra_text}"
 
                 if debug:
                     logger.info(f"[DynamicLifeState] 生成 prompt:\n{prompt}")

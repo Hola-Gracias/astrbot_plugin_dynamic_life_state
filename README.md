@@ -18,6 +18,7 @@
   - `extra_user_content_parts`：以 `<life_state>` 标签追加到用户消息末尾（推荐，不破坏前缀缓存）
   - `fake_tool_call`：以伪造工具调用消息对注入到对话历史（Gemini 下自动降级）
 - **完整状态查询**：提供 `get_full_dynamic_life_state` LLM Tool，模型可按需查询今日概况、氛围和完整时间线
+- **历史状态参考**：生成前归档旧业务周期，并按配置读取最近的成功历史状态作为生成参考
 - **会话过滤**：支持白名单/黑名单/全启用三种模式（注入和 Tool 均受过滤约束）
 
 ### 命令
@@ -35,7 +36,7 @@
 ### 不支持的功能（第一版边界）
 
 - 没有外部 API
-- 没有历史/聊天参考
+- 没有聊天记录参考
 - 没有节日/天气集成
 - 没有 session/persona 分区（全局共享一份状态）
 
@@ -46,15 +47,16 @@
 | `session_list_mode` | string | 会话名单模式：whitelist / blacklist / none |
 | `session_list` | list | 会话 UMO 列表 |
 | `generate_time` | string | 未来新状态的每日生成时间和业务周期边界 (HH:MM) |
+| `history_reference_days` | int | 生成时参考的最近成功历史业务周期数，范围 0–7，0 表示不参考 |
 | `llm_provider_id` | string | 生成用的 LLM Provider（留空走默认） |
 | `persona_id` | string | 生成用的人格设定（留空走默认） |
 | `injection_mode` | string | 注入方式：extra_user_content_parts / fake_tool_call |
-| `prompt_template` | text | 生成 prompt 模板；留空使用默认提示词。占位符：`{business_date}`、`{cycle_start}`、`{cycle_end}` 和 `{persona}` |
+| `prompt_template` | text | 生成 prompt 模板；留空使用默认提示词。占位符：`{business_date}`、`{cycle_start}`、`{cycle_end}`、`{persona}`、`{history_states}` 和 `{extra_requirements}` |
 | `debug_mode` | bool | 调试模式，输出生成 prompt、模型返回、解析结果等 |
 
 ### 数据结构
 
-状态保存在 `plugin_data/astrbot_plugin_dynamic_life_state/life_state.json`。顶层键为冻结的周期起点，但每个业务日期只保留一份状态；新周期会替换同一业务日期的旧周期：
+当前状态保存在 `plugin_data/astrbot_plugin_dynamic_life_state/life_state.json`。顶层键为冻结的周期起点，文件中只保留当前业务日期；同一业务日期重新生成时直接替换旧状态：
 
 升级时，上一版仅包含 `business_date` 的状态会按加载当刻的 `generate_time` 补齐周期并立即重写；此后该周期不再变化。
 
@@ -77,6 +79,18 @@
   }
 }
 ```
+
+进入新的业务周期并开始生成前，旧状态会归档到 `history/`：
+
+```text
+plugin_data/astrbot_plugin_dynamic_life_state/
+├── life_state.json
+└── history/
+    ├── life_state_2026.06.29.json
+    └── life_state_2026.06.30.json
+```
+
+历史文件沿用相同的 JSON 结构，每个文件只包含文件名对应的业务日期。最多保留最近 7 个历史业务周期；`/dls full <YYYY-MM-DD>` 和 LLM Tool 均可按业务日期查询仍在保留期内的状态。生成提示词只参考早于目标业务日期且状态成功的最近 N 个周期。
 
 ### 时段匹配规则
 
