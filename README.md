@@ -261,6 +261,11 @@ LLM 必须返回可解析的 JSON 对象，至少包含以下字段：
 - 状态生成需要至少一个可用的文本 LLM Provider
 - 功能与平台适配器无关，但 `fake_tool_call` 的支持情况取决于 Provider
 
+## 🔗 相关项目
+
+- **[AstrBot](https://github.com/AstrBotDevs/AstrBot)** - 核心
+- **[AstrBot Life Scheduler Plugin](https://github.com/muyouzhi6/astrbot_plugin_life_scheduler)** - 一个为 AstrBot 设计的拟人化生活日程生成插件。本项目的灵感来源
+
 ## 许可证
 
 [MIT License](LICENSE)
