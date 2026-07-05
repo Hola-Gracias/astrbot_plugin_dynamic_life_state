@@ -50,6 +50,7 @@ def build_injection_text(
         f"当前时段范围: {interval_label}\n"
         f"当前安排: {schedule_label}\n"
         f"当前穿搭: {outfit_label}\n"
+        f"无需主动提及这些状态\n"
         f"</life_state>"
     )
 
