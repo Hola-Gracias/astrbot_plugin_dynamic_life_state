@@ -41,6 +41,7 @@ def build_injection_text(
 
     return (
         f"<life_state>\n"
+        f"这是你当前的生活状态，可供参考，无需主动提及\n"
         f"业务日期: {state.business_date}\n"
         f"状态周期: {format_cycle(cycle)}\n"
         f"当前自然日期时间: {format_datetime(now)}\n"
@@ -50,7 +51,6 @@ def build_injection_text(
         f"当前时段范围: {interval_label}\n"
         f"当前安排: {schedule_label}\n"
         f"当前穿搭: {outfit_label}\n"
-        f"无需主动提及这些状态\n"
         f"</life_state>"
     )
 
