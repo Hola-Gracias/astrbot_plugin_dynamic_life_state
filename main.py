@@ -76,7 +76,7 @@ class DynamicLifeStatePlugin(Star):
     # =========================
 
     def _resolve_timezone(self) -> zoneinfo.ZoneInfo:
-        tz_setting = str(self.context.get_config().get("timezone") or "Asia/Shanghai")
+        tz_setting = str(self.config.get("timezone") or "Asia/Shanghai").strip()
         try:
             return zoneinfo.ZoneInfo(tz_setting)
         except (ValueError, zoneinfo.ZoneInfoNotFoundError):
