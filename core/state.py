@@ -391,14 +391,26 @@ class DataManager:
                     destination.replace(source)
                 except Exception as rollback_exc:
                     rollback_error = rollback_exc
+            if rollback_error is not None:
+                # Preserve recovery files because they may be the only surviving copy.
+                logger.error(
+                    f"[DynamicLifeState] Legacy storage backup failed and "
+                    f"rollback was incomplete; recovery data remains at "
+                    f"{backup_dir}; backup error: {exc}; "
+                    f"rollback error: {rollback_error}"
+                )
+                raise OSError(
+                    f"Legacy storage backup failed and rollback was incomplete; "
+                    f"recovery data remains at {backup_dir}"
+                ) from rollback_error
             try:
                 backup_dir.rmdir()
-            except OSError:
-                pass
-            if rollback_error is not None:
-                raise OSError(
-                    "Legacy storage backup failed and rollback was incomplete"
-                ) from rollback_error
+            except OSError as cleanup_exc:
+                logger.warning(
+                    f"[DynamicLifeState] Legacy storage rollback restored the "
+                    f"original data, but failed to remove backup directory "
+                    f"{backup_dir}: {cleanup_exc}"
+                )
             raise OSError(
                 "Legacy storage backup failed; original data restored"
             ) from exc
@@ -423,12 +435,24 @@ class DataManager:
                 continue
             state = self._load_path(path)
             if state is None or state.date != file_date.isoformat():
-                path.unlink()
+                try:
+                    path.unlink()
+                except OSError as exc:
+                    logger.warning(
+                        f"[DynamicLifeState] Failed to remove invalid history "
+                        f"file {path}: {exc}"
+                    )
                 continue
             history_files.append((file_date, path))
 
         for _, path in sorted(history_files, reverse=True)[MAX_HISTORY_DAYS:]:
-            path.unlink()
+            try:
+                path.unlink()
+            except OSError as exc:
+                logger.warning(
+                    f"[DynamicLifeState] Failed to remove expired history file "
+                    f"{path}: {exc}"
+                )
 
 
 # =========================
