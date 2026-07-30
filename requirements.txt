@@ -1,1 +1,2 @@
 apscheduler>=3.11.0
+holidays>=0.101,<1
