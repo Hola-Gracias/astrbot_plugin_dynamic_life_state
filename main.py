@@ -274,7 +274,12 @@ class DynamicLifeStatePlugin(Star):
             return unified_msg_origin in session_list
         if mode == "blacklist":
             return unified_msg_origin not in session_list
-        # Unknown values use whitelist behavior.
+        if getattr(self, "_warned_invalid_session_mode", None) != mode:
+            logger.warning(
+                f"[DynamicLifeState] Invalid session_list_mode {mode!r}; "
+                "falling back to whitelist behavior"
+            )
+            self._warned_invalid_session_mode = mode
         return unified_msg_origin in session_list
 
     # =========================
