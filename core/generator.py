@@ -2,6 +2,7 @@ import asyncio
 import datetime
 import json
 import re
+import zoneinfo
 from pathlib import Path
 
 from astrbot.api import logger
@@ -10,7 +11,6 @@ from astrbot.core.star.context import Context
 
 from .state import (
     MAX_HISTORY_DAYS,
-    BusinessCycle,
     DataManager,
     LifeState,
     TimelineEntry,
@@ -18,10 +18,23 @@ from .state import (
 )
 
 _SCHEMA_PATH = Path(__file__).resolve().parent.parent / "_conf_schema.json"
+_LEGACY_PROMPT_PLACEHOLDERS = (
+    "{business_date}",
+    "{cycle_start}",
+    "{cycle_end}",
+)
 
 
 def _render_template(template: str, **kwargs: str) -> str:
-    """安全渲染模板：只替换已知占位符，其他花括号原样保留。"""
+    """Replace known placeholders while preserving other braces.
+
+    Args:
+        template: Prompt template.
+        **kwargs: Supported placeholder values.
+
+    Returns:
+        Rendered prompt.
+    """
     return re.sub(
         r"\{([A-Za-z_][A-Za-z0-9_]*)\}",
         lambda match: kwargs.get(match.group(1), match.group(0)),
@@ -30,7 +43,14 @@ def _render_template(template: str, **kwargs: str) -> str:
 
 
 def _load_default_prompt_template() -> str:
-    """从配置 schema 读取 prompt_template 的默认值。"""
+    """Load the default prompt from the plugin config schema.
+
+    Returns:
+        Default prompt template.
+
+    Raises:
+        ValueError: The schema does not contain a usable default prompt.
+    """
     schema = json.loads(_SCHEMA_PATH.read_text(encoding="utf-8"))
     template = schema.get("prompt_template", {}).get("default")
     if not isinstance(template, str) or not template.strip():
@@ -44,7 +64,7 @@ class Generator:
         context: Context,
         config: AstrBotConfig,
         data_mgr: DataManager,
-    ):
+    ) -> None:
         self.context = context
         self.config = config
         self.data_mgr = data_mgr
@@ -52,26 +72,41 @@ class Generator:
 
     @property
     def is_generating(self) -> bool:
+        """Return whether a generation call currently holds the shared lock."""
         return self._gen_lock.locked()
 
     def _get_prompt_template(self) -> str:
+        """Return a supported custom prompt or the new schema default.
+
+        Returns:
+            Prompt template without legacy placeholders.
+        """
         configured = self.config.get("prompt_template", "")
         if isinstance(configured, str) and configured.strip():
+            if any(
+                placeholder in configured for placeholder in _LEGACY_PROMPT_PLACEHOLDERS
+            ):
+                logger.warning(
+                    "[DynamicLifeState] Legacy prompt placeholders detected; "
+                    "using the v0.2.0 default prompt until the custom template "
+                    "is updated"
+                )
+                return _load_default_prompt_template()
             return configured
         logger.warning(
-            "[DynamicLifeState] prompt_template 为空，使用配置 schema 默认提示词"
+            "[DynamicLifeState] prompt_template is empty; using the schema default"
         )
         return _load_default_prompt_template()
 
     @staticmethod
     def _format_history(states: list[LifeState]) -> str:
-        """将历史状态渲染为生成提示词使用的文本。
+        """Render historical states for the generation prompt.
 
         Args:
-            states: 按业务日期从新到旧排列的历史状态。
+            states: States ordered from newest to oldest.
 
         Returns:
-            包含日程、穿搭和时间线的历史状态文本；无状态时返回“无”。
+            Historical schedule text, or ``无`` when no state is available.
         """
         if not states:
             return "无"
@@ -79,7 +114,7 @@ class Generator:
         sections: list[str] = []
         for state in states:
             lines = [
-                f"[{state.business_date}]",
+                f"[{state.date}]",
                 f"整体日程：{state.schedule_summary or '无'}",
                 f"穿搭风格：{state.style_summary or '无'}",
                 "时间线：",
@@ -102,17 +137,29 @@ class Generator:
 
     async def generate(
         self,
-        cycle: BusinessCycle,
+        target_date: datetime.date,
+        timezone: zoneinfo.ZoneInfo,
         force: bool = False,
         extra: str | None = None,
     ) -> LifeState:
-        """生成并持久化指定业务周期的生活状态。"""
-        async with self._gen_lock:
-            business_date = cycle.business_date.isoformat()
+        """Generate and persist a natural-date life state.
 
-            # 二次检查：可能在等锁期间已被另一个任务生成（force 时跳过）
+        Args:
+            target_date: Natural date captured by the generation caller.
+            timezone: Configured IANA timezone for the state.
+            force: Whether to replace an existing successful state.
+            extra: Optional user requirements for forced regeneration.
+
+        Returns:
+            Generated state, including a failed state when generation fails.
+        """
+        async with self._gen_lock:
+            date = target_date.isoformat()
+            timezone_name = timezone.key
+
+            # Re-check after waiting for the lock to deduplicate concurrent callers.
             if not force:
-                existing = self.data_mgr.get_by_cycle(cycle)
+                existing = self.data_mgr.get_current(date, timezone_name)
                 if existing and existing.status == "ok":
                     return existing
 
@@ -120,17 +167,18 @@ class Generator:
 
             try:
                 logger.info(
-                    f"[DynamicLifeState] 正在生成业务日期 {business_date} 的生活状态..."
+                    f"[DynamicLifeState] Generating life state for {date} "
+                    f"in {timezone_name}"
                 )
 
-                self.data_mgr.archive_before_generation(business_date)
+                self.data_mgr.archive_before_generation(date)
                 try:
                     history_days = int(self.config.get("history_reference_days", 3))
                 except (TypeError, ValueError):
                     history_days = 3
                 history_days = max(0, min(history_days, MAX_HISTORY_DAYS))
                 history_states = self.data_mgr.get_recent_history(
-                    business_date,
+                    date,
                     history_days,
                 )
                 history_text = self._format_history(history_states)
@@ -138,64 +186,64 @@ class Generator:
 
             except Exception as e:
                 logger.error(
-                    f"[DynamicLifeState] 生成准备失败，保留现有状态 "
-                    f"(业务日期 {business_date}): {e}"
+                    f"[DynamicLifeState] Generation preparation failed for "
+                    f"{date}; preserving the current state: {e}"
                 )
-                return LifeState.from_cycle(
-                    cycle,
+                return LifeState(
+                    date=date,
+                    timezone=timezone_name,
                     status="failed",
-                    generated_at=datetime.datetime.now(cycle.start.tzinfo).isoformat(),
+                    generated_at=datetime.datetime.now(timezone).isoformat(),
                 )
 
             try:
                 persona = await self._get_persona()
                 prompt = _render_template(
                     self._get_prompt_template(),
-                    business_date=business_date,
-                    cycle_start=cycle.start.isoformat(timespec="minutes"),
-                    cycle_end=cycle.end.isoformat(timespec="minutes"),
+                    date=date,
+                    timezone=timezone_name,
                     persona=persona,
                     history_states=history_text,
                     extra_requirements=extra_text,
                 )
 
                 if debug:
-                    logger.info(f"[DynamicLifeState] 生成 prompt:\n{prompt}")
+                    logger.info(f"[DynamicLifeState] Generation prompt:\n{prompt}")
 
                 provider = await self._get_provider()
                 if not provider:
-                    raise RuntimeError("没有可用的 LLM Provider")
+                    raise RuntimeError("No LLM provider is available")
 
-                sid = f"dynamic_life_state_gen_{business_date}"
+                sid = f"dynamic_life_state_gen_{date}"
                 resp = await provider.text_chat(prompt, session_id=sid)
                 text = self._extract_completion_text(resp)
 
                 if debug:
-                    logger.info(f"[DynamicLifeState] 模型原始返回:\n{text}")
+                    logger.info(f"[DynamicLifeState] Raw model response:\n{text}")
 
                 payload = self._extract_json(text)
-                generated_at = datetime.datetime.now(cycle.start.tzinfo).isoformat()
+                generated_at = datetime.datetime.now(timezone).isoformat()
                 state = self._validate_and_build(
                     payload,
-                    cycle,
+                    target_date,
+                    timezone,
                     generated_at,
                 )
 
             except Exception as e:
-                logger.error(
-                    f"[DynamicLifeState] 生成失败 (业务日期 {business_date}): {e}"
-                )
-                failed = LifeState.from_cycle(
-                    cycle,
+                logger.error(f"[DynamicLifeState] Generation failed for {date}: {e}")
+                failed = LifeState(
+                    date=date,
+                    timezone=timezone_name,
                     status="failed",
-                    generated_at=datetime.datetime.now(cycle.start.tzinfo).isoformat(),
+                    generated_at=datetime.datetime.now(timezone).isoformat(),
                 )
                 try:
                     self.data_mgr.set(failed)
                 except Exception as save_error:
                     logger.error(
-                        f"[DynamicLifeState] 失败状态保存失败 "
-                        f"(业务日期 {business_date}): {save_error}"
+                        f"[DynamicLifeState] Failed to persist generation failure "
+                        f"for {date}: {save_error}"
                     )
                 return failed
 
@@ -203,34 +251,49 @@ class Generator:
                 self.data_mgr.set(state)
             except Exception as e:
                 logger.error(
-                    f"[DynamicLifeState] 生成结果保存失败 "
-                    f"(业务日期 {business_date}): {e}"
+                    f"[DynamicLifeState] Failed to persist generated state "
+                    f"for {date}: {e}"
                 )
-                return LifeState.from_cycle(
-                    cycle,
+                return LifeState(
+                    date=date,
+                    timezone=timezone_name,
                     status="failed",
-                    generated_at=datetime.datetime.now(cycle.start.tzinfo).isoformat(),
+                    generated_at=datetime.datetime.now(timezone).isoformat(),
                 )
 
             if debug:
                 logger.info(
-                    f"[DynamicLifeState] 解析后的状态:\n"
+                    f"[DynamicLifeState] Parsed state:\n"
                     f"{json.dumps(self._state_to_dict(state), ensure_ascii=False, indent=2)}"
                 )
 
-            logger.info(f"[DynamicLifeState] 业务日期 {business_date} 生活状态生成成功")
+            logger.info(
+                f"[DynamicLifeState] Life state generated successfully for {date}"
+            )
             return state
 
     # ---------- persona ----------
 
     @staticmethod
     def _extract_persona_prompt(persona: object) -> str:
-        """从人格对象中提取 prompt 文本，兼容 system_prompt 和旧 prompt 字段。"""
+        """Extract prompt text from current and legacy persona objects.
+
+        Args:
+            persona: Persona mapping or object.
+
+        Returns:
+            Persona system prompt, or an empty string.
+        """
         if isinstance(persona, dict):
             return persona.get("system_prompt") or persona.get("prompt", "")
         return getattr(persona, "system_prompt", None) or getattr(persona, "prompt", "")
 
     async def _get_persona(self) -> str:
+        """Load the configured or default persona prompt.
+
+        Returns:
+            Persona prompt, or an empty string when unavailable.
+        """
         persona_id = str(self.config.get("persona_id", "")).strip()
         if persona_id:
             try:
@@ -238,7 +301,9 @@ class Generator:
                 if persona:
                     return self._extract_persona_prompt(persona)
             except Exception as e:
-                logger.warning(f"[DynamicLifeState] 读取指定人格失败: {e}")
+                logger.warning(
+                    f"[DynamicLifeState] Failed to load configured persona: {e}"
+                )
 
         try:
             p = await self.context.persona_manager.get_default_persona_v3()
@@ -249,6 +314,7 @@ class Generator:
     # ---------- provider ----------
 
     async def _get_provider(self):
+        """Return the configured or active LLM provider."""
         provider_id = str(self.config.get("llm_provider_id", "")).strip()
         if provider_id:
             return self.context.get_provider_by_id(provider_id)
@@ -258,6 +324,14 @@ class Generator:
 
     @staticmethod
     def _extract_completion_text(resp: object) -> str:
+        """Extract completion text from supported provider responses.
+
+        Args:
+            resp: Provider response object.
+
+        Returns:
+            Normalized completion text.
+        """
         if resp is None:
             return ""
         for key in ("completion_text", "completion", "text", "content"):
@@ -270,6 +344,14 @@ class Generator:
 
     @staticmethod
     def _extract_json(text: str) -> dict | None:
+        """Extract the first complete JSON object from model text.
+
+        Args:
+            text: Raw model completion.
+
+        Returns:
+            Parsed mapping, or ``None`` when no valid object is found.
+        """
         text = text.strip()
         text = re.sub(r"^```json\s*", "", text, flags=re.MULTILINE)
         text = re.sub(r"^```\s*", "", text, flags=re.MULTILINE)
@@ -310,19 +392,33 @@ class Generator:
     @staticmethod
     def _validate_and_build(
         payload: dict | None,
-        cycle: BusinessCycle,
+        target_date: datetime.date,
+        timezone: zoneinfo.ZoneInfo,
         generated_at: str,
     ) -> LifeState:
+        """Validate model JSON and build a natural-date state.
+
+        Args:
+            payload: Parsed model JSON.
+            target_date: Date requested by the caller.
+            timezone: Configured timezone for the generated state.
+            generated_at: Actual generation completion timestamp.
+
+        Returns:
+            Validated life state.
+
+        Raises:
+            ValueError: The payload does not match the required schema.
+        """
         if not payload:
             raise ValueError("未能从模型输出中解析出 JSON 对象")
 
-        # 基础校验
-        business_date = cycle.business_date.isoformat()
-        business_date_val = payload.get("business_date")
-        if business_date_val != business_date:
+        # Validate the required top-level schema.
+        date = target_date.isoformat()
+        date_value = payload.get("date")
+        if date_value != date:
             raise ValueError(
-                "business_date 字段必须与目标业务日期一致: "
-                f"expected={business_date}, actual={business_date_val}"
+                f"date 字段必须与目标日期一致: expected={date}, actual={date_value}"
             )
 
         timeline_raw = payload.get("timeline")
@@ -356,8 +452,9 @@ class Generator:
                 "timeline 中没有有效条目（每项需要可解析的 time 以及 schedule/outfit）"
             )
 
-        return LifeState.from_cycle(
-            cycle,
+        return LifeState(
+            date=date,
+            timezone=timezone.key,
             schedule_summary=str(payload.get("schedule_summary", "")),
             style_summary=str(payload.get("style_summary", "")),
             timeline=entries,
@@ -367,10 +464,16 @@ class Generator:
 
     @staticmethod
     def _state_to_dict(state: LifeState) -> dict:
+        """Convert a generated state into a debug payload.
+
+        Args:
+            state: Generated life state.
+
+        Returns:
+            JSON-compatible state mapping.
+        """
         return {
-            "business_date": state.business_date,
-            "cycle_start": state.cycle_start,
-            "cycle_end": state.cycle_end,
+            "date": state.date,
             "timezone": state.timezone,
             "schedule_summary": state.schedule_summary,
             "style_summary": state.style_summary,

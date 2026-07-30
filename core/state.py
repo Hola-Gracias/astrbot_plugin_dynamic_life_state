@@ -2,16 +2,13 @@ import datetime
 import json
 import re
 import zoneinfo
-from collections.abc import Callable
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
 
 from astrbot.api import logger
 
-DEFAULT_GENERATE_TIME = "07:00"
-
 # =========================
-# 数据模型
+# Data models
 # =========================
 
 
@@ -25,107 +22,92 @@ class TimelineEntry:
     note: str = ""
 
     @classmethod
-    def from_dict(cls, d: dict) -> "TimelineEntry":
+    def from_dict(cls, data: dict) -> "TimelineEntry":
+        """Create a timeline entry from persisted data.
+
+        Args:
+            data: Raw timeline entry mapping.
+
+        Returns:
+            Normalized timeline entry.
+        """
         return cls(
-            time=str(d.get("time", "")),
-            schedule=str(d.get("schedule", "")),
-            outfit=str(d.get("outfit", "")),
-            mood=str(d.get("mood", "")),
-            location=str(d.get("location", "")),
-            note=str(d.get("note", "")),
+            time=str(data.get("time", "")),
+            schedule=str(data.get("schedule", "")),
+            outfit=str(data.get("outfit", "")),
+            mood=str(data.get("mood", "")),
+            location=str(data.get("location", "")),
+            note=str(data.get("note", "")),
         )
 
 
 @dataclass(slots=True)
 class LifeState:
-    business_date: str  # yyyy-mm-dd
-    cycle_start: str  # 带时区的 ISO 时间戳
-    cycle_end: str  # 带时区的 ISO 时间戳
-    timezone: str  # IANA 时区名称
+    date: str  # YYYY-MM-DD
+    timezone: str  # IANA timezone name
     schedule_summary: str = ""
     style_summary: str = ""
     timeline: list[TimelineEntry] = field(default_factory=list)
     status: str = "ok"  # "ok" | "failed"
-    generated_at: str = ""  # ISO 时间戳
+    generated_at: str = ""  # ISO timestamp
 
     @classmethod
-    def from_cycle(cls, cycle: "BusinessCycle", **kwargs) -> "LifeState":
-        """使用生成时的业务周期创建状态。"""
-        timezone = getattr(cycle.start.tzinfo, "key", None)
+    def from_dict(cls, data: dict) -> "LifeState":
+        """Create and validate a life state from persisted data.
+
+        Args:
+            data: Raw state mapping.
+
+        Returns:
+            Validated life state.
+
+        Raises:
+            ValueError: The date or timezone field is missing or invalid.
+            ZoneInfoNotFoundError: The persisted timezone does not exist.
+        """
+        date = data.get("date")
+        if not isinstance(date, str):
+            raise ValueError("date field is missing or is not a string")
+        datetime.date.fromisoformat(date)
+
+        timezone = data.get("timezone")
         if not isinstance(timezone, str) or not timezone:
-            raise ValueError("业务周期必须使用 IANA 时区")
-        return cls(
-            business_date=cycle.business_date.isoformat(),
-            cycle_start=cycle.start.isoformat(),
-            cycle_end=cycle.end.isoformat(),
-            timezone=timezone,
-            **kwargs,
-        )
+            raise ValueError("timezone field is missing or is not a string")
+        zoneinfo.ZoneInfo(timezone)
 
-    @classmethod
-    def from_dict(cls, d: dict) -> "LifeState":
-        business_date = d.get("business_date")
-        if not isinstance(business_date, str):
-            raise ValueError("business_date 字段缺失或非字符串")
-        datetime.date.fromisoformat(business_date)
-
-        cycle_start = d.get("cycle_start")
-        cycle_end = d.get("cycle_end")
-        timezone = d.get("timezone")
-        if not all(isinstance(value, str) for value in (cycle_start, cycle_end)):
-            raise ValueError("cycle_start/cycle_end 字段缺失或非字符串")
-        if not isinstance(timezone, str):
-            raise ValueError("timezone 字段缺失或非字符串")
-
-        timeline_raw = d.get("timeline", [])
+        timeline_raw = data.get("timeline", [])
         if not isinstance(timeline_raw, list):
             timeline_raw = []
         return cls(
-            business_date=business_date,
-            cycle_start=cycle_start,
-            cycle_end=cycle_end,
+            date=date,
             timezone=timezone,
-            schedule_summary=str(d.get("schedule_summary", "")),
-            style_summary=str(d.get("style_summary", "")),
-            timeline=[TimelineEntry.from_dict(e) for e in timeline_raw],
-            status=str(d.get("status", "ok")),
-            generated_at=str(d.get("generated_at", "")),
+            schedule_summary=str(data.get("schedule_summary", "")),
+            style_summary=str(data.get("style_summary", "")),
+            timeline=[
+                TimelineEntry.from_dict(entry)
+                for entry in timeline_raw
+                if isinstance(entry, dict)
+            ],
+            status=str(data.get("status", "ok")),
+            generated_at=str(data.get("generated_at", "")),
         )
-
-    def to_cycle(self) -> "BusinessCycle":
-        """从持久化字段恢复生成时冻结的业务周期。"""
-        timezone = zoneinfo.ZoneInfo(self.timezone)
-        start = datetime.datetime.fromisoformat(self.cycle_start)
-        end = datetime.datetime.fromisoformat(self.cycle_end)
-        if start.tzinfo is None or end.tzinfo is None:
-            raise ValueError("cycle_start/cycle_end 必须包含时区")
-        start = start.astimezone(timezone)
-        end = end.astimezone(timezone)
-        business_date = datetime.date.fromisoformat(self.business_date)
-        if start.date() != business_date:
-            raise ValueError("cycle_start 与 business_date 不一致")
-        if start >= end:
-            raise ValueError("cycle_start 必须早于 cycle_end")
-        return BusinessCycle(business_date=business_date, start=start, end=end)
-
-
-@dataclass(frozen=True, slots=True)
-class BusinessCycle:
-    business_date: datetime.date
-    start: datetime.datetime
-    end: datetime.datetime
-
-    def contains(self, value: datetime.datetime) -> bool:
-        return self.start <= value < self.end
 
 
 @dataclass(frozen=True, slots=True)
 class TimeInterval:
-    start: datetime.datetime
-    end: datetime.datetime
+    start: int
+    end: int
 
-    def contains(self, value: datetime.datetime) -> bool:
-        return self.start <= value < self.end
+    def contains(self, minute: int) -> bool:
+        """Return whether a minute of day belongs to the interval.
+
+        Args:
+            minute: Minute of day in the range 0 through 1439.
+
+        Returns:
+            Whether the interval contains the minute.
+        """
+        return self.start <= minute < self.end
 
 
 @dataclass(frozen=True, slots=True)
@@ -136,22 +118,33 @@ class SlotMatch:
 
 
 def format_datetime(value: datetime.datetime) -> str:
-    """格式化带时区的自然日期时间。"""
+    """Format a timezone-aware current date and time.
+
+    Args:
+        value: Date and time to format.
+
+    Returns:
+        Human-readable date, time, and timezone.
+    """
     return value.strftime("%Y-%m-%d %H:%M %Z")
 
 
 def format_interval(interval: TimeInterval) -> str:
-    """格式化左闭右开的实际时间区间。"""
-    return f"[{format_datetime(interval.start)}, {format_datetime(interval.end)})"
+    """Format a left-closed, right-open interval within one day.
 
+    Args:
+        interval: Minute-based interval.
 
-def format_cycle(cycle: BusinessCycle) -> str:
-    """格式化业务周期。"""
-    return f"[{format_datetime(cycle.start)}, {format_datetime(cycle.end)})"
+    Returns:
+        Interval formatted as ``[HH:MM, HH:MM)``.
+    """
+    start_hour, start_minute = divmod(interval.start, 60)
+    end_hour, end_minute = divmod(interval.end, 60)
+    return f"[{start_hour:02d}:{start_minute:02d}, {end_hour:02d}:{end_minute:02d})"
 
 
 # =========================
-# 持久化管理
+# Persistence
 # =========================
 
 MAX_HISTORY_DAYS = 7
@@ -159,137 +152,97 @@ _HISTORY_FILE_RE = re.compile(r"life_state_(\d{4}\.\d{2}\.\d{2})\.json")
 
 
 class DataManager:
-    def __init__(
-        self,
-        json_path: Path,
-        legacy_cycle_resolver: Callable[[str], BusinessCycle] | None = None,
-    ):
+    def __init__(self, json_path: Path):
         self._path = json_path
         self._history_dir = json_path.parent / "history"
-        self._legacy_cycle_resolver = legacy_cycle_resolver
-        self._data: dict[str, LifeState] = {}
+        self._data: LifeState | None = None
+        self._backup_legacy_storage()
         self.load()
 
-    @staticmethod
-    def _cycle_key(cycle: BusinessCycle) -> str:
-        return cycle.start.isoformat()
-
-    def get_by_cycle(self, cycle: BusinessCycle) -> LifeState | None:
-        return self._data.get(self._cycle_key(cycle))
-
-    def find_active(self, now: datetime.datetime) -> LifeState | None:
-        """返回覆盖 now 的最新有效状态。"""
-        candidates: list[tuple[datetime.datetime, LifeState]] = []
-        for state in self._data.values():
-            if state.status != "ok":
-                continue
-            try:
-                cycle = state.to_cycle()
-            except (ValueError, zoneinfo.ZoneInfoNotFoundError):
-                continue
-            if cycle.contains(now):
-                candidates.append((cycle.start, state))
-        if not candidates:
-            return None
-        return max(candidates, key=lambda item: item[0])[1]
-
-    def get_by_business_date(self, date_str: str) -> list[LifeState]:
-        """按周期起点顺序返回指定业务日期的所有状态。"""
-        candidates: list[tuple[datetime.datetime, LifeState]] = []
-        for state in self._data.values():
-            if state.business_date != date_str:
-                continue
-            try:
-                cycle = state.to_cycle()
-            except (ValueError, zoneinfo.ZoneInfoNotFoundError):
-                continue
-            candidates.append((cycle.start, state))
-
-        if not candidates:
-            try:
-                history_path = self._history_path(date_str)
-            except ValueError:
-                return []
-            history_data, _ = self._load_path(history_path)
-            for state in history_data.values():
-                if state.business_date != date_str:
-                    continue
-                try:
-                    cycle = state.to_cycle()
-                except (ValueError, zoneinfo.ZoneInfoNotFoundError):
-                    continue
-                candidates.append((cycle.start, state))
-
-        candidates.sort(key=lambda item: item[0])
-        return [state for _, state in candidates]
-
-    def get_latest_for_business_date(self, date_str: str) -> LifeState | None:
-        states = self.get_by_business_date(date_str)
-        return states[-1] if states else None
-
-    def archive_before_generation(self, business_date: str) -> None:
-        """归档目标业务日期之外的当前状态。
+    def get_current(self, date: str, timezone: str) -> LifeState | None:
+        """Return the state matching the configured current day.
 
         Args:
-            business_date: 即将生成状态的业务日期，格式为 YYYY-MM-DD。
-
-        Raises:
-            ValueError: 业务日期格式无效时抛出。
-            OSError: 历史状态或当前状态写入失败时抛出。
-        """
-        datetime.date.fromisoformat(business_date)
-        archived_keys: list[str] = []
-
-        for cycle_key, state in self._data.items():
-            if state.business_date == business_date:
-                continue
-
-            history_path = self._history_path(state.business_date)
-            history_path.parent.mkdir(parents=True, exist_ok=True)
-            state_dict = asdict(state)
-            state_dict["timeline"] = [asdict(entry) for entry in state.timeline]
-            payload = {cycle_key: state_dict}
-            tmp_path = history_path.with_suffix(".json.tmp")
-            tmp_path.write_text(
-                json.dumps(payload, ensure_ascii=False, indent=2),
-                encoding="utf-8",
-            )
-            tmp_path.replace(history_path)
-            archived_keys.append(cycle_key)
-
-        if archived_keys:
-            previous_data = self._data
-            self._data = {
-                cycle_key: state
-                for cycle_key, state in self._data.items()
-                if cycle_key not in archived_keys
-            }
-            try:
-                self.save()
-            except Exception:
-                self._data = previous_data
-                raise
-
-        self._prune_history()
-
-    def get_recent_history(
-        self,
-        before_business_date: str,
-        limit: int,
-    ) -> list[LifeState]:
-        """返回指定业务日期之前最近的成功历史状态。
-
-        Args:
-            before_business_date: 历史状态必须早于该业务日期。
-            limit: 最多返回的历史业务周期数。
+            date: Target date in YYYY-MM-DD format.
+            timezone: Configured IANA timezone name.
 
         Returns:
-            按业务日期从新到旧排列的成功历史状态。
+            Matching current state, including a failed state, or ``None``.
+        """
+        datetime.date.fromisoformat(date)
+        if (
+            self._data is None
+            or self._data.date != date
+            or self._data.timezone != timezone
+        ):
+            return None
+        return self._data
+
+    def get_by_date(self, date: str) -> LifeState | None:
+        """Return the current or archived state for a natural date.
+
+        Args:
+            date: Target date in YYYY-MM-DD format.
+
+        Returns:
+            Matching state or ``None``.
+        """
+        datetime.date.fromisoformat(date)
+        if self._data is not None and self._data.date == date:
+            return self._data
+        return self._load_path(self._history_path(date))
+
+    def archive_before_generation(self, target_date: str) -> None:
+        """Archive a current state belonging to a different date.
+
+        A same-date state remains in place until the replacement is safely
+        persisted. This also covers a timezone change without creating two
+        historical states for the same date.
+
+        Args:
+            target_date: Date about to be generated, in YYYY-MM-DD format.
 
         Raises:
-            ValueError: 业务日期格式无效时抛出。
+            ValueError: The target date is invalid.
+            OSError: The archive or current-state update fails.
         """
-        before_date = datetime.date.fromisoformat(before_business_date)
+        datetime.date.fromisoformat(target_date)
+        if self._data is None or self._data.date == target_date:
+            self._prune_history()
+            return
+
+        history_path = self._history_path(self._data.date)
+        history_path.parent.mkdir(parents=True, exist_ok=True)
+        tmp_path = history_path.with_suffix(".json.tmp")
+        tmp_path.write_text(
+            json.dumps(asdict(self._data), ensure_ascii=False, indent=2),
+            encoding="utf-8",
+        )
+        tmp_path.replace(history_path)
+
+        previous = self._data
+        self._data = None
+        try:
+            self.save()
+        except Exception:
+            self._data = previous
+            raise
+        self._prune_history()
+
+    def get_recent_history(self, before_date: str, limit: int) -> list[LifeState]:
+        """Return recent successful states before a natural date.
+
+        Args:
+            before_date: Exclusive upper date bound in YYYY-MM-DD format.
+            limit: Maximum number of successful states to return.
+
+        Returns:
+            States ordered from newest to oldest.
+
+        Raises:
+            ValueError: The date is invalid.
+        """
+        parsed_before = datetime.date.fromisoformat(before_date)
         if limit <= 0 or not self._history_dir.exists():
             return []
 
@@ -304,68 +257,156 @@ class DataManager:
                 ).date()
             except ValueError:
                 continue
-            if file_date < before_date:
+            if file_date < parsed_before:
                 history_files.append((file_date, path))
 
         states: list[LifeState] = []
         for file_date, path in sorted(history_files, reverse=True):
-            history_data, _ = self._load_path(path)
-            candidates: list[tuple[datetime.datetime, LifeState]] = []
-            expected_date = file_date.isoformat()
-            for state in history_data.values():
-                if state.business_date != expected_date or state.status != "ok":
-                    continue
-                try:
-                    cycle = state.to_cycle()
-                except (ValueError, zoneinfo.ZoneInfoNotFoundError):
-                    continue
-                candidates.append((cycle.start, state))
-            if candidates:
-                states.append(max(candidates, key=lambda item: item[0])[1])
+            state = self._load_path(path)
+            if (
+                state is None
+                or state.date != file_date.isoformat()
+                or state.status != "ok"
+            ):
+                continue
+            states.append(state)
             if len(states) >= limit:
                 break
-
         return states
 
     def set(self, state: LifeState) -> None:
-        """Persist the state as the only current business cycle.
+        """Persist a state as the only current natural-date state.
 
         Args:
-            state: State to persist as the current business cycle.
+            state: State to persist.
 
         Raises:
-            ValueError: The state contains an invalid business cycle.
-            OSError: The current state file cannot be written.
+            ValueError: The state date or timezone is invalid.
+            ZoneInfoNotFoundError: The state timezone does not exist.
+            OSError: The current state cannot be written.
         """
-        cycle = state.to_cycle()
-        cycle_key = self._cycle_key(cycle)
-        previous_data = self._data
-        self._data = {cycle_key: state}
+        datetime.date.fromisoformat(state.date)
+        zoneinfo.ZoneInfo(state.timezone)
+
+        previous = self._data
+        self._data = state
         try:
             self.save()
         except Exception:
-            self._data = previous_data
+            self._data = previous
             raise
 
-        history_path = self._history_path(state.business_date)
+        history_path = self._history_path(state.date)
         if history_path.exists():
             try:
                 history_path.unlink()
-            except OSError as e:
+            except OSError as exc:
                 logger.warning(
-                    f"[DynamicLifeState] 无法删除同业务日期历史文件 {history_path}: {e}"
+                    f"[DynamicLifeState] Failed to remove same-date history "
+                    f"{history_path}: {exc}"
                 )
 
-    @staticmethod
-    def _history_filename(business_date: datetime.date) -> str:
-        return f"life_state_{business_date.strftime('%Y.%m.%d')}.json"
+    def load(self) -> None:
+        """Load the current state from disk."""
+        self._data = self._load_path(self._path)
 
-    def _history_path(self, business_date: str) -> Path:
-        parsed = datetime.date.fromisoformat(business_date)
+    def save(self) -> None:
+        """Atomically persist the current state."""
+        if self._data is None:
+            if self._path.exists():
+                self._path.unlink()
+            return
+
+        self._path.parent.mkdir(parents=True, exist_ok=True)
+        tmp_path = self._path.with_suffix(".tmp")
+        tmp_path.write_text(
+            json.dumps(asdict(self._data), ensure_ascii=False, indent=2),
+            encoding="utf-8",
+        )
+        tmp_path.replace(self._path)
+
+    @staticmethod
+    def _history_filename(date: datetime.date) -> str:
+        return f"life_state_{date.strftime('%Y.%m.%d')}.json"
+
+    def _history_path(self, date: str) -> Path:
+        parsed = datetime.date.fromisoformat(date)
         return self._history_dir / self._history_filename(parsed)
 
+    @staticmethod
+    def _load_path(path: Path) -> LifeState | None:
+        """Load one new-format state file.
+
+        Args:
+            path: State file to read.
+
+        Returns:
+            Parsed state, or ``None`` for a missing or invalid file.
+        """
+        if not path.exists():
+            return None
+        try:
+            raw = json.loads(path.read_text(encoding="utf-8"))
+            if not isinstance(raw, dict):
+                return None
+            return LifeState.from_dict(raw)
+        except Exception:
+            return None
+
+    def _backup_legacy_storage(self) -> None:
+        """Move legacy or unrecognized live storage into a timestamped backup.
+
+        Raises:
+            OSError: Moving the old storage fails and cannot be rolled back.
+        """
+        needs_backup = self._path.exists() and self._load_path(self._path) is None
+        if self._history_dir.exists():
+            for path in self._history_dir.iterdir():
+                if (
+                    _HISTORY_FILE_RE.fullmatch(path.name)
+                    and self._load_path(path) is None
+                ):
+                    needs_backup = True
+                    break
+        if not needs_backup:
+            return
+
+        timestamp = datetime.datetime.now(datetime.timezone.utc).strftime(
+            "%Y%m%dT%H%M%S%fZ"
+        )
+        backup_dir = self._path.parent / f"legacy_backup_{timestamp}"
+        backup_dir.mkdir(parents=True)
+        moved: list[tuple[Path, Path]] = []
+        try:
+            for source in (self._path, self._history_dir):
+                if not source.exists():
+                    continue
+                destination = backup_dir / source.name
+                source.replace(destination)
+                moved.append((source, destination))
+        except Exception as exc:
+            rollback_error: Exception | None = None
+            for source, destination in reversed(moved):
+                try:
+                    destination.replace(source)
+                except Exception as rollback_exc:
+                    rollback_error = rollback_exc
+            try:
+                backup_dir.rmdir()
+            except OSError:
+                pass
+            if rollback_error is not None:
+                raise OSError(
+                    "Legacy storage backup failed and rollback was incomplete"
+                ) from rollback_error
+            raise OSError(
+                "Legacy storage backup failed; original data restored"
+            ) from exc
+
+        logger.warning(f"[DynamicLifeState] Legacy state storage moved to {backup_dir}")
+
     def _prune_history(self) -> None:
-        """Remove invalid files and retain the newest seven history states."""
+        """Remove invalid files and retain the newest seven dated states."""
         if not self._history_dir.exists():
             return
 
@@ -380,12 +421,8 @@ class DataManager:
                 ).date()
             except ValueError:
                 continue
-            history_data, _ = self._load_path(path)
-            if (
-                len(history_data) != 1
-                or next(iter(history_data.values())).business_date
-                != file_date.isoformat()
-            ):
+            state = self._load_path(path)
+            if state is None or state.date != file_date.isoformat():
                 path.unlink()
                 continue
             history_files.append((file_date, path))
@@ -393,126 +430,20 @@ class DataManager:
         for _, path in sorted(history_files, reverse=True)[MAX_HISTORY_DAYS:]:
             path.unlink()
 
-    def _load_path(
-        self,
-        path: Path,
-        *,
-        allow_legacy: bool = False,
-    ) -> tuple[dict[str, LifeState], bool]:
-        """读取并规范化单个状态文件。
-
-        Args:
-            path: 要读取的状态文件。
-            allow_legacy: 是否允许补齐旧版缺少周期字段的数据。
-
-        Returns:
-            规范化后的状态映射，以及是否需要重写源文件。
-        """
-        if not path.exists():
-            return {}, False
-        try:
-            raw = json.loads(path.read_text(encoding="utf-8"))
-        except Exception:
-            return {}, False
-        if not isinstance(raw, dict):
-            return {}, False
-
-        data: dict[str, LifeState] = {}
-        migrated = False
-        for cycle_key, item in raw.items():
-            if not isinstance(item, dict):
-                continue
-            try:
-                was_migrated = False
-                if "cycle_start" in item:
-                    state = LifeState.from_dict(item)
-                else:
-                    business_date = item.get("business_date")
-                    if (
-                        not allow_legacy
-                        or not isinstance(business_date, str)
-                        or self._legacy_cycle_resolver is None
-                    ):
-                        continue
-                    cycle = self._legacy_cycle_resolver(business_date)
-                    timeline_raw = item.get("timeline", [])
-                    if not isinstance(timeline_raw, list):
-                        timeline_raw = []
-                    state = LifeState.from_cycle(
-                        cycle,
-                        schedule_summary=str(item.get("schedule_summary", "")),
-                        style_summary=str(item.get("style_summary", "")),
-                        timeline=[
-                            TimelineEntry.from_dict(entry)
-                            for entry in timeline_raw
-                            if isinstance(entry, dict)
-                        ],
-                        status=str(item.get("status", "ok")),
-                        generated_at=str(item.get("generated_at", "")),
-                    )
-                    migrated = True
-                    was_migrated = True
-                cycle = state.to_cycle()
-                resolved_key = self._cycle_key(cycle)
-                if not was_migrated and resolved_key != cycle_key:
-                    continue
-                data[resolved_key] = state
-            except Exception:
-                continue
-
-        deduplicated: dict[str, LifeState] = {}
-        for cycle_key, state in sorted(
-            data.items(),
-            key=lambda item: item[1].to_cycle().start,
-        ):
-            previous = next(
-                (
-                    key
-                    for key, existing in deduplicated.items()
-                    if existing.business_date == state.business_date
-                ),
-                None,
-            )
-            if previous is not None:
-                del deduplicated[previous]
-            deduplicated[cycle_key] = state
-
-        rewritten = migrated or len(deduplicated) != len(data)
-        return deduplicated, rewritten
-
-    def load(self) -> None:
-        self._data, rewritten = self._load_path(self._path, allow_legacy=True)
-        if rewritten:
-            self.save()
-
-    def save(self) -> None:
-        self._path.parent.mkdir(parents=True, exist_ok=True)
-        tmp_path = self._path.with_suffix(".tmp")
-        payload = {}
-        for cycle_key, state in self._data.items():
-            d = asdict(state)
-            d["timeline"] = [asdict(e) for e in state.timeline]
-            payload[cycle_key] = d
-        tmp_path.write_text(
-            json.dumps(payload, ensure_ascii=False, indent=2),
-            encoding="utf-8",
-        )
-        tmp_path.replace(self._path)
-
 
 # =========================
-# 时间段选择
+# Time-slot matching
 # =========================
 
 _NATURAL_SLOTS: dict[str, tuple[int, int]] = {
-    "凌晨": (0, 6),
-    "早上": (6, 9),
-    "上午": (9, 12),
-    "中午": (12, 14),
-    "下午": (14, 18),
-    "傍晚": (18, 20),
-    "晚上": (20, 23),
-    "深夜": (23, 24),
+    "凌晨": (0, 6 * 60),
+    "早上": (6 * 60, 9 * 60),
+    "上午": (9 * 60, 12 * 60),
+    "中午": (12 * 60, 14 * 60),
+    "下午": (14 * 60, 18 * 60),
+    "傍晚": (18 * 60, 20 * 60),
+    "晚上": (20 * 60, 23 * 60),
+    "深夜": (23 * 60, 24 * 60),
 }
 
 NATURAL_SLOT_NAMES: tuple[str, ...] = tuple(_NATURAL_SLOTS.keys())
@@ -522,27 +453,34 @@ _CLOCK_TIME_RE = re.compile(r"(\d{2}):(\d{2})")
 
 
 def _parse_time_slot(time_str: str) -> tuple[int, int] | None:
-    """将时间段字符串解析为 (start_minute_of_day, end_minute_of_day)。"""
-    time_str = time_str.strip()
-    m = _TIME_RANGE_RE.fullmatch(time_str)
-    if m:
-        h1, m1, h2, m2 = map(int, m.groups())
-        if not (0 <= h1 <= 23 and 0 <= m1 <= 59):
-            return None
-        if not (0 <= h2 <= 24 and 0 <= m2 <= 59):
-            return None
-        if h2 == 24 and m2 != 0:
-            return None
-        start_minute = h1 * 60 + m1
-        end_minute = h2 * 60 + m2
-        if start_minute == end_minute:
-            return None
-        return (start_minute, end_minute)
+    """Parse a timeline label into a minute-of-day range.
 
-    for keyword, (start_h, end_h) in _NATURAL_SLOTS.items():
-        if keyword in time_str:
-            return (start_h * 60, end_h * 60)
+    Args:
+        time_str: Natural slot name or explicit time range.
 
+    Returns:
+        Start and end minutes, preserving a cross-midnight end before clipping,
+        or ``None`` when the label is invalid.
+    """
+    value = time_str.strip()
+    match = _TIME_RANGE_RE.fullmatch(value)
+    if match:
+        start_hour, start_minute, end_hour, end_minute = map(int, match.groups())
+        if not (0 <= start_hour <= 23 and 0 <= start_minute <= 59):
+            return None
+        if not (0 <= end_hour <= 24 and 0 <= end_minute <= 59):
+            return None
+        if end_hour == 24 and end_minute != 0:
+            return None
+        start = start_hour * 60 + start_minute
+        end = end_hour * 60 + end_minute
+        if start == end:
+            return None
+        return start, end
+
+    for keyword, interval in _NATURAL_SLOTS.items():
+        if keyword in value:
+            return interval
     return None
 
 
@@ -551,173 +489,86 @@ def _is_specific_time_range(time_str: str) -> bool:
 
 
 def is_valid_time_slot(time_str: str) -> bool:
-    """返回时间线时段是否可解析。"""
+    """Return whether a timeline time label is supported.
+
+    Args:
+        time_str: Timeline time label.
+
+    Returns:
+        Whether the label can be parsed.
+    """
     return _parse_time_slot(time_str) is not None
 
 
-def parse_generate_time(generate_time: str | None) -> datetime.time:
-    """严格解析 HH:MM 格式的业务周期边界。"""
-    value = (generate_time or "").strip()
-    match = _CLOCK_TIME_RE.fullmatch(value)
+def parse_clock_time(value: str) -> int:
+    """Parse a strict HH:MM query into a minute of day.
+
+    Args:
+        value: Clock time in HH:MM format.
+
+    Returns:
+        Minute of day in the range 0 through 1439.
+
+    Raises:
+        ValueError: The value is not a valid HH:MM time.
+    """
+    match = _CLOCK_TIME_RE.fullmatch(value.strip())
     if not match:
-        raise ValueError("generate_time 必须使用 HH:MM 格式")
+        raise ValueError("time must use HH:MM format")
     hour, minute = map(int, match.groups())
     if not (0 <= hour <= 23 and 0 <= minute <= 59):
-        raise ValueError("generate_time 必须是有效的 24 小时时间")
-    return datetime.time(hour=hour, minute=minute)
+        raise ValueError("time must be a valid 24-hour clock value")
+    return hour * 60 + minute
 
 
-def build_business_cycle(
-    business_date: datetime.date | str,
-    generate_time: str,
-    timezone: datetime.tzinfo,
-) -> BusinessCycle:
-    """根据业务日期和配置边界构造带时区的业务周期。"""
-    if isinstance(business_date, str):
-        business_date = datetime.date.fromisoformat(business_date)
-    boundary_time = parse_generate_time(generate_time)
-    start = datetime.datetime.combine(
-        business_date,
-        boundary_time,
-        tzinfo=timezone,
-    )
-    end = datetime.datetime.combine(
-        business_date + datetime.timedelta(days=1),
-        boundary_time,
-        tzinfo=timezone,
-    )
-    return BusinessCycle(business_date=business_date, start=start, end=end)
+def minute_of_day(value: datetime.datetime) -> int:
+    """Return the local minute represented by a date and time.
+
+    Args:
+        value: Local date and time.
+
+    Returns:
+        Minute of day.
+    """
+    return value.hour * 60 + value.minute
 
 
-def resolve_business_cycle(
-    generate_time: str,
-    timezone: datetime.tzinfo,
-    now: datetime.datetime | None = None,
-) -> BusinessCycle:
-    """根据当前自然时间解析其所属业务周期。"""
-    now = now or datetime.datetime.now(timezone)
-    if now.tzinfo is None:
-        now = now.replace(tzinfo=timezone)
-    else:
-        now = now.astimezone(timezone)
+def resolve_entry_intervals(entry: TimelineEntry) -> tuple[TimeInterval, ...]:
+    """Resolve an entry within one natural day.
 
-    boundary = datetime.datetime.combine(
-        now.date(),
-        parse_generate_time(generate_time),
-        tzinfo=timezone,
-    )
-    business_date = now.date()
-    if now < boundary:
-        business_date -= datetime.timedelta(days=1)
-    return build_business_cycle(business_date, generate_time, timezone)
+    Cross-midnight explicit ranges are retained but clipped at 24:00. For
+    example, ``23:00-02:00`` resolves to ``23:00-24:00``.
 
+    Args:
+        entry: Timeline entry to resolve.
 
-def resolve_time_in_cycle(cycle: BusinessCycle, time_str: str) -> datetime.datetime:
-    """将 HH:MM 映射到业务周期内唯一的自然日期时间。"""
-    query_time = parse_generate_time(time_str)
-    candidate = datetime.datetime.combine(
-        cycle.business_date,
-        query_time,
-        tzinfo=cycle.start.tzinfo,
-    )
-    if candidate < cycle.start:
-        candidate = datetime.datetime.combine(
-            cycle.business_date + datetime.timedelta(days=1),
-            query_time,
-            tzinfo=cycle.start.tzinfo,
-        )
-    return candidate
-
-
-def _datetime_at_minute(
-    value_date: datetime.date,
-    minute_of_day: int,
-    timezone: datetime.tzinfo,
-) -> datetime.datetime:
-    hour, minute = divmod(minute_of_day, 60)
-    return datetime.datetime.combine(
-        value_date,
-        datetime.time(hour=hour, minute=minute),
-        tzinfo=timezone,
-    )
-
-
-def _resolve_range_intervals(
-    start_minute: int,
-    end_minute: int,
-    cycle: BusinessCycle,
-) -> tuple[TimeInterval, ...]:
-    timezone = cycle.start.tzinfo
-    if timezone is None:
-        raise ValueError("业务周期必须包含时区")
-
-    intervals: list[TimeInterval] = []
-    first_date = cycle.business_date - datetime.timedelta(days=1)
-    for offset in range(3):
-        value_date = first_date + datetime.timedelta(days=offset)
-        start = _datetime_at_minute(value_date, start_minute, timezone)
-        if end_minute == 24 * 60:
-            end = _datetime_at_minute(
-                value_date + datetime.timedelta(days=1),
-                0,
-                timezone,
-            )
-        elif end_minute <= start_minute:
-            end = _datetime_at_minute(
-                value_date + datetime.timedelta(days=1),
-                end_minute,
-                timezone,
-            )
-        else:
-            end = _datetime_at_minute(value_date, end_minute, timezone)
-
-        clipped_start = max(start, cycle.start)
-        clipped_end = min(end, cycle.end)
-        if clipped_start < clipped_end:
-            intervals.append(TimeInterval(clipped_start, clipped_end))
-
-    return tuple(sorted(set(intervals), key=lambda interval: interval.start))
-
-
-def resolve_physical_intervals(
-    time_str: str,
-    cycle: BusinessCycle,
-) -> tuple[TimeInterval, ...]:
-    """返回时段与业务周期相交的全部物理片段。"""
-    parsed = _parse_time_slot(time_str)
+    Returns:
+        One in-day interval, or an empty tuple for an invalid label.
+    """
+    parsed = _parse_time_slot(entry.time)
     if parsed is None:
         return ()
-    return _resolve_range_intervals(parsed[0], parsed[1], cycle)
+    start, end = parsed
+    if end <= start:
+        end = 24 * 60
+    return (TimeInterval(start, end),)
 
 
-def resolve_entry_intervals(
-    entry: TimelineEntry,
-    cycle: BusinessCycle,
-) -> tuple[TimeInterval, ...]:
-    """返回条目生效区间；自然时段仅保留首个物理片段。"""
-    intervals = resolve_physical_intervals(entry.time, cycle)
-    if _is_specific_time_range(entry.time):
-        return intervals
-    return intervals[:1]
-
-
-def _natural_slot_name(now: datetime.datetime) -> str | None:
-    current_minute = now.hour * 60 + now.minute
-    for name, (start_h, end_h) in _NATURAL_SLOTS.items():
-        if start_h * 60 <= current_minute < end_h * 60:
+def _natural_slot_name(minute: int) -> str | None:
+    for name, (start, end) in _NATURAL_SLOTS.items():
+        if start <= minute < end:
             return name
     return None
 
 
 def _latest_entry_before(
     timeline: list[TimelineEntry],
-    cycle: BusinessCycle,
-    before: datetime.datetime,
+    before: int,
 ) -> TimelineEntry | None:
     best: TimelineEntry | None = None
-    best_start: datetime.datetime | None = None
+    best_start: int | None = None
     for entry in timeline:
-        for interval in resolve_entry_intervals(entry, cycle):
+        for interval in resolve_entry_intervals(entry):
             if interval.start < before and (
                 best_start is None or interval.start > best_start
             ):
@@ -728,36 +579,21 @@ def _latest_entry_before(
 
 def select_current_slot(
     timeline: list[TimelineEntry],
-    cycle: BusinessCycle,
-    now: datetime.datetime,
+    current_minute: int,
 ) -> SlotMatch | None:
-    """根据当前时间从 timeline 中选择最匹配的时段。
+    """Select the best timeline entry for a minute of the current date.
 
-    优先级：
-    1. 具体时间区间（如 "12:30-13:30"）覆盖当前时间 → 直接使用。
-    2. 自然时段（如 "下午"）的首个有效片段覆盖当前时间 → 直接使用。
-    3. 当前自然时段缺失或处于周期尾部残片 → 构造临时 TimelineEntry：
-       - time: 当前自然时段名称
-       - schedule: "空闲"
-       - outfit: 继承最近一个更早时段的穿搭；若无更早条目则为空字符串。
-
-    不会修改或持久化原始 timeline。
+    Explicit ranges take priority over natural slots. When no entry covers the
+    minute, a temporary idle entry inherits the most recent earlier outfit.
 
     Args:
-        timeline: 时间线条目列表。
-        now: 当前时间，用于测试注入。
+        timeline: Timeline entries to search.
+        current_minute: Minute of day in the range 0 through 1439.
 
     Returns:
-        匹配的 SlotMatch，或 None（timeline 为空或 now 不在周期内）。
+        Matching or synthesized slot, or ``None`` when the timeline is empty.
     """
-    if not timeline:
-        return None
-
-    if now.tzinfo is None:
-        now = now.replace(tzinfo=cycle.start.tzinfo)
-    else:
-        now = now.astimezone(cycle.start.tzinfo)
-    if not cycle.contains(now):
+    if not timeline or not 0 <= current_minute < 24 * 60:
         return None
 
     specific_entries: list[TimelineEntry] = []
@@ -770,73 +606,59 @@ def select_current_slot(
         else:
             natural_entries.append(entry)
 
-    # 优先：具体时间区间覆盖当前时间
     for entry in specific_entries:
-        intervals = resolve_entry_intervals(entry, cycle)
+        intervals = resolve_entry_intervals(entry)
         for interval in intervals:
-            if interval.contains(now):
+            if interval.contains(current_minute):
                 return SlotMatch(entry, intervals, interval)
 
-    # 其次：自然时段覆盖当前时间
     for entry in natural_entries:
-        intervals = resolve_entry_intervals(entry, cycle)
+        intervals = resolve_entry_intervals(entry)
         for interval in intervals:
-            if interval.contains(now):
+            if interval.contains(current_minute):
                 return SlotMatch(entry, intervals, interval)
 
-    # 当前自然时段缺失 → 构造临时条目
-    current_slot_name = _natural_slot_name(now)
-    if current_slot_name:
-        physical_intervals = resolve_physical_intervals(current_slot_name, cycle)
-        active_interval = next(
-            (interval for interval in physical_intervals if interval.contains(now)),
-            None,
-        )
-        intervals = (active_interval,) if active_interval else ()
-        best = _latest_entry_before(timeline, cycle, now)
-        inherited_outfit = best.outfit if best else ""
-        return SlotMatch(
-            TimelineEntry(
-                time=current_slot_name,
-                schedule="空闲",
-                outfit=inherited_outfit,
-            ),
-            intervals,
-            active_interval,
-        )
+    current_slot_name = _natural_slot_name(current_minute)
+    if current_slot_name is None:
+        return None
 
-    # 极端情况：无法确定自然时段（不应发生）
-    return None
+    interval = TimeInterval(*_NATURAL_SLOTS[current_slot_name])
+    best = _latest_entry_before(timeline, current_minute)
+    return SlotMatch(
+        TimelineEntry(
+            time=current_slot_name,
+            schedule="空闲",
+            outfit=best.outfit if best else "",
+        ),
+        (interval,),
+        interval,
+    )
 
 
 def find_slot_by_name(
     timeline: list[TimelineEntry],
     name: str,
-    cycle: BusinessCycle,
 ) -> SlotMatch | None:
-    """按自然时段名称查找条目。
-
-    缺失时合成临时条目：schedule 为"空闲"，穿搭继承严格早于目标时段的最近条目；
-    若没有更早条目则为空字符串。
+    """Find or synthesize a natural time slot.
 
     Args:
-        timeline: 时间线条目列表。
-        name: 自然时段名称，如 ``下午`` 或 ``中午``。
+        timeline: Timeline entries to search.
+        name: One of the supported natural slot names.
 
     Returns:
-        匹配或合成的 SlotMatch；name 不在八个自然时段名称中时返回 None。
+        Matching or synthesized slot, or ``None`` for an unsupported name.
     """
     if name not in _NATURAL_SLOTS:
         return None
 
     for entry in timeline:
         if entry.time == name:
-            return SlotMatch(entry, resolve_entry_intervals(entry, cycle))
+            intervals = resolve_entry_intervals(entry)
+            return SlotMatch(entry, intervals)
 
-    synthetic = TimelineEntry(name, "空闲", "")
-    intervals = resolve_entry_intervals(synthetic, cycle)
-    if not intervals:
-        return None
-    best = _latest_entry_before(timeline, cycle, intervals[0].start)
-    synthetic.outfit = best.outfit if best else ""
-    return SlotMatch(synthetic, intervals)
+    interval = TimeInterval(*_NATURAL_SLOTS[name])
+    best = _latest_entry_before(timeline, interval.start)
+    return SlotMatch(
+        TimelineEntry(name, "空闲", best.outfit if best else ""),
+        (interval,),
+    )
