@@ -268,4 +268,4 @@ LLM 必须返回可解析的 JSON 对象，至少包含以下字段：
 
 ## 许可证
 
-[MIT License](LICENSE)
+[AGPL-3.0](LICENSE)

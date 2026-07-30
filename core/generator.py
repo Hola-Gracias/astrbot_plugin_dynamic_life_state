@@ -91,6 +91,12 @@ class Generator:
                         f"  - 穿搭：{entry.outfit or '无'}",
                     ]
                 )
+                if entry.mood:
+                    lines.append(f"  - 心情：{entry.mood}")
+                if entry.location:
+                    lines.append(f"  - 地点：{entry.location}")
+                if entry.note:
+                    lines.append(f"  - 备注：{entry.note}")
             sections.append("\n".join(lines))
         return "\n\n".join(sections)
 
@@ -339,6 +345,9 @@ class Generator:
                     time=str(time_val),
                     schedule=str(schedule_val),
                     outfit=str(outfit_val),
+                    mood=str(item.get("mood", "")),
+                    location=str(item.get("location", "")),
+                    note=str(item.get("note", "")),
                 )
             )
 
@@ -366,7 +375,14 @@ class Generator:
             "schedule_summary": state.schedule_summary,
             "style_summary": state.style_summary,
             "timeline": [
-                {"time": e.time, "schedule": e.schedule, "outfit": e.outfit}
+                {
+                    "time": e.time,
+                    "schedule": e.schedule,
+                    "outfit": e.outfit,
+                    "mood": e.mood,
+                    "location": e.location,
+                    "note": e.note,
+                }
                 for e in state.timeline
             ],
             "status": state.status,

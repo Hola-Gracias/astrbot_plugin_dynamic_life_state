@@ -32,25 +32,34 @@ def build_injection_text(
     schedule_label = "无"
     outfit_label = "无"
     interval_label = "无"
+    optional_labels: list[str] = []
     if current_match:
         slot_label = current_match.entry.time
         schedule_label = current_match.entry.schedule
         outfit_label = current_match.entry.outfit
+        if current_match.entry.mood:
+            optional_labels.append(f"当前心情: {current_match.entry.mood}\n")
+        if current_match.entry.location:
+            optional_labels.append(f"当前位置: {current_match.entry.location}\n")
+        if current_match.entry.note:
+            optional_labels.append(f"当前备注: {current_match.entry.note}\n")
         if current_match.active_interval:
             interval_label = format_interval(current_match.active_interval)
 
     return (
         f"<life_state>\n"
-        f"这是你当前的生活状态，可供参考，无需主动提及\n"
+        f"这是你当前的生活状态，可供参考\n"
+        f"话题无关时无需主动提及\n"
         f"业务日期: {state.business_date}\n"
         f"状态周期: {format_cycle(cycle)}\n"
         f"当前自然日期时间: {format_datetime(now)}\n"
-        f"周期概况: {state.schedule_summary or '无'}\n"
-        f"周期氛围: {state.style_summary or '无'}\n"
+        f"今日概况: {state.schedule_summary or '无'}\n"
+        f"今日氛围: {state.style_summary or '无'}\n"
         f"当前时段: {slot_label}\n"
         f"当前时段范围: {interval_label}\n"
         f"当前安排: {schedule_label}\n"
         f"当前穿搭: {outfit_label}\n"
+        f"{''.join(optional_labels)}"
         f"</life_state>"
     )
 
@@ -83,6 +92,9 @@ def build_state_json(
         ),
         "current_schedule": entry.schedule if entry else "",
         "current_outfit": entry.outfit if entry else "",
+        "current_mood": entry.mood if entry else "",
+        "current_location": entry.location if entry else "",
+        "current_note": entry.note if entry else "",
     }
 
 

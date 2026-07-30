@@ -20,6 +20,9 @@ class TimelineEntry:
     time: str
     schedule: str
     outfit: str
+    mood: str = ""
+    location: str = ""
+    note: str = ""
 
     @classmethod
     def from_dict(cls, d: dict) -> "TimelineEntry":
@@ -27,6 +30,9 @@ class TimelineEntry:
             time=str(d.get("time", "")),
             schedule=str(d.get("schedule", "")),
             outfit=str(d.get("outfit", "")),
+            mood=str(d.get("mood", "")),
+            location=str(d.get("location", "")),
+            note=str(d.get("note", "")),
         )
 
 

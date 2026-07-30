@@ -254,7 +254,7 @@ class DynamicLifeStatePlugin(Star):
     # =========================
 
     def _is_session_enabled(self, unified_msg_origin: str) -> bool:
-        mode = str(self.config.get("session_list_mode", "none")).strip()
+        mode = str(self.config.get("session_list_mode", "whitelist")).strip()
         session_list: list[str] = list(self.config.get("session_list", []) or [])
 
         if mode == "none":
@@ -263,7 +263,8 @@ class DynamicLifeStatePlugin(Star):
             return unified_msg_origin in session_list
         if mode == "blacklist":
             return unified_msg_origin not in session_list
-        return True
+        # 未知模式降级为 whitelist 行为
+        return unified_msg_origin in session_list
 
     # =========================
     # 注入方式降级
@@ -376,9 +377,15 @@ class DynamicLifeStatePlugin(Star):
                 f"⌛ 时段范围：{self._format_match_intervals(match) or '无'}",
                 f"📋 {schedule_label}：{match.entry.schedule}",
                 f"👗 {outfit_label}：{match.entry.outfit}",
-                f"⏰ 实际生成时间：{state.generated_at or '未知'}",
             ]
         )
+        if match.entry.mood:
+            lines.append(f"🙂 心情：{match.entry.mood}")
+        if match.entry.location:
+            lines.append(f"📍 地点：{match.entry.location}")
+        if match.entry.note:
+            lines.append(f"🗒️ 备注：{match.entry.note}")
+        lines.append(f"⏰ 实际生成时间：{state.generated_at or '未知'}")
         return "\n".join(lines)
 
     def _format_full_state(
@@ -402,6 +409,15 @@ class DynamicLifeStatePlugin(Star):
                 f"  [{entry.time}] {interval_text or '无法解析'} | "
                 f"{entry.schedule} | 👗 {entry.outfit}"
             )
+            details = []
+            if entry.mood:
+                details.append(f"🙂 {entry.mood}")
+            if entry.location:
+                details.append(f"📍 {entry.location}")
+            if entry.note:
+                details.append(f"🗒️ {entry.note}")
+            if details:
+                lines.append(f"    {' | '.join(details)}")
         return "\n".join(lines)
 
     # =========================
