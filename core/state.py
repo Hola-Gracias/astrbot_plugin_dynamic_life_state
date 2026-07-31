@@ -2,7 +2,7 @@ import datetime
 import json
 import re
 import zoneinfo
-from dataclasses import asdict, dataclass, field
+from dataclasses import dataclass, field
 from pathlib import Path
 
 from astrbot.api import logger
@@ -11,40 +11,108 @@ from astrbot.api import logger
 # Data models
 # =========================
 
+CHINA_TIMEZONE = zoneinfo.ZoneInfo("Asia/Shanghai")
+
+# Registry of optional timeline fields.  The mapping order is the render order.
+# The registry is the single source for: the optional-field whitelist, the
+# Chinese label, the render icon, the render order, and the prompt description.
+# ``time``, ``schedule`` and ``outfit`` are required fields and are not listed
+# here.  Extending optional fields only requires editing this dictionary.
+OPTIONAL_TIMELINE_FIELDS: dict[str, dict[str, str]] = {
+    "mood": {
+        "label": "心情",
+        "icon": "🙂",
+    },
+    "location": {
+        "label": "地点",
+        "icon": "📍",
+    },
+    "note": {
+        "label": "备注",
+        "icon": "🗒️",
+    },
+}
+
 
 @dataclass(slots=True)
 class TimelineEntry:
     time: str
     schedule: str
     outfit: str
-    mood: str = ""
-    location: str = ""
-    note: str = ""
+    extra_fields: dict[str, str] = field(default_factory=dict)
+
+    def __post_init__(self) -> None:
+        """Normalize optional fields at the construction boundary.
+
+        Only registered keys with non-empty string values survive; values
+        are trimmed and ordered by the registry.  This guarantees that every
+        construction path (direct calls included) produces a clean model,
+        so rendering and serialization never leak empty, non-string or
+        unregistered values.
+        """
+        normalized: dict[str, str] = {}
+        for key in OPTIONAL_TIMELINE_FIELDS:
+            value = self.extra_fields.get(key)
+            if isinstance(value, str) and value.strip():
+                normalized[key] = value.strip()
+        self.extra_fields = normalized
 
     @classmethod
-    def from_dict(cls, data: dict) -> "TimelineEntry":
-        """Create a timeline entry from persisted data.
+    def from_dict(cls, data: dict) -> "TimelineEntry | None":
+        """Create a timeline entry from persisted or model JSON data.
+
+        Required fields must be non-empty strings and ``time`` must parse as
+        a supported slot; invalid entries are rejected with ``None``.
+        Optional fields are accepted only when their key is registered in
+        ``OPTIONAL_TIMELINE_FIELDS``; empty, non-string and unregistered
+        values are dropped by ``__post_init__``.
 
         Args:
             data: Raw timeline entry mapping.
 
         Returns:
-            Normalized timeline entry.
+            Normalized timeline entry, or ``None`` when a required field is
+            missing, blank, not a string, or ``time`` is not a valid slot.
         """
+        required_fields: dict[str, str] = {}
+        for key in ("time", "schedule", "outfit"):
+            value = data.get(key)
+            if not isinstance(value, str) or not value.strip():
+                return None
+            required_fields[key] = value.strip()
+        if not is_valid_time_slot(required_fields["time"]):
+            return None
         return cls(
-            time=str(data.get("time", "")),
-            schedule=str(data.get("schedule", "")),
-            outfit=str(data.get("outfit", "")),
-            mood=str(data.get("mood", "")),
-            location=str(data.get("location", "")),
-            note=str(data.get("note", "")),
+            time=required_fields["time"],
+            schedule=required_fields["schedule"],
+            outfit=required_fields["outfit"],
+            extra_fields=data,
         )
+
+    def to_dict(self) -> dict:
+        """Serialize to a flat JSON-compatible mapping.
+
+        Optional fields are written as top-level keys in registry order, so
+        no nested ``extra_fields`` object ever appears in persisted data.
+
+        Returns:
+            Flat timeline entry mapping.
+        """
+        data = {
+            "time": self.time,
+            "schedule": self.schedule,
+            "outfit": self.outfit,
+        }
+        for key in OPTIONAL_TIMELINE_FIELDS:
+            if key in self.extra_fields:
+                data[key] = self.extra_fields[key]
+        return data
 
 
 @dataclass(slots=True)
 class LifeState:
     date: str  # YYYY-MM-DD
-    timezone: str  # IANA timezone name
+    holiday: str = "无"
     schedule_summary: str = ""
     style_summary: str = ""
     timeline: list[TimelineEntry] = field(default_factory=list)
@@ -62,35 +130,59 @@ class LifeState:
             Validated life state.
 
         Raises:
-            ValueError: The date or timezone field is missing or invalid.
-            ZoneInfoNotFoundError: The persisted timezone does not exist.
+            ValueError: The date field is missing or invalid, or the state
+                declares ``status == "ok"`` while the timeline contains no
+                valid entries.
         """
         date = data.get("date")
         if not isinstance(date, str):
             raise ValueError("date field is missing or is not a string")
         datetime.date.fromisoformat(date)
 
-        timezone = data.get("timezone")
-        if not isinstance(timezone, str) or not timezone:
-            raise ValueError("timezone field is missing or is not a string")
-        zoneinfo.ZoneInfo(timezone)
-
         timeline_raw = data.get("timeline", [])
         if not isinstance(timeline_raw, list):
             timeline_raw = []
+        timeline = [
+            entry
+            for entry in (
+                TimelineEntry.from_dict(item)
+                for item in timeline_raw
+                if isinstance(item, dict)
+            )
+            if entry is not None
+        ]
+        status = str(data.get("status", "ok"))
+        if status == "ok" and not timeline:
+            raise ValueError("status is ok but the timeline has no valid entries")
         return cls(
             date=date,
-            timezone=timezone,
+            holiday=(
+                data["holiday"].strip()
+                if isinstance(data.get("holiday"), str) and data["holiday"].strip()
+                else "无"
+            ),
             schedule_summary=str(data.get("schedule_summary", "")),
             style_summary=str(data.get("style_summary", "")),
-            timeline=[
-                TimelineEntry.from_dict(entry)
-                for entry in timeline_raw
-                if isinstance(entry, dict)
-            ],
-            status=str(data.get("status", "ok")),
+            timeline=timeline,
+            status=status,
             generated_at=str(data.get("generated_at", "")),
         )
+
+    def to_dict(self) -> dict:
+        """Serialize to a flat JSON-compatible mapping.
+
+        Returns:
+            Flat state mapping ready for persistence or debug logging.
+        """
+        return {
+            "date": self.date,
+            "holiday": self.holiday,
+            "schedule_summary": self.schedule_summary,
+            "style_summary": self.style_summary,
+            "timeline": [entry.to_dict() for entry in self.timeline],
+            "status": self.status,
+            "generated_at": self.generated_at,
+        }
 
 
 @dataclass(frozen=True, slots=True)
@@ -118,15 +210,15 @@ class SlotMatch:
 
 
 def format_datetime(value: datetime.datetime) -> str:
-    """Format a timezone-aware current date and time.
+    """Format the current date and time.
 
     Args:
         value: Date and time to format.
 
     Returns:
-        Human-readable date, time, and timezone.
+        Human-readable date and time.
     """
-    return value.strftime("%Y-%m-%d %H:%M %Z")
+    return value.strftime("%Y-%m-%d %H:%M")
 
 
 def format_interval(interval: TimeInterval) -> str:
@@ -159,22 +251,17 @@ class DataManager:
         self._backup_legacy_storage()
         self.load()
 
-    def get_current(self, date: str, timezone: str) -> LifeState | None:
-        """Return the state matching the configured current day.
+    def get_current(self, date: str) -> LifeState | None:
+        """Return the state matching the current China Standard Time date.
 
         Args:
             date: Target date in YYYY-MM-DD format.
-            timezone: Configured IANA timezone name.
 
         Returns:
             Matching current state, including a failed state, or ``None``.
         """
         datetime.date.fromisoformat(date)
-        if (
-            self._data is None
-            or self._data.date != date
-            or self._data.timezone != timezone
-        ):
+        if self._data is None or self._data.date != date:
             return None
         return self._data
 
@@ -196,8 +283,7 @@ class DataManager:
         """Archive a current state belonging to a different date.
 
         A same-date state remains in place until the replacement is safely
-        persisted. This also covers a timezone change without creating two
-        historical states for the same date.
+        persisted.
 
         Args:
             target_date: Date about to be generated, in YYYY-MM-DD format.
@@ -215,7 +301,7 @@ class DataManager:
         history_path.parent.mkdir(parents=True, exist_ok=True)
         tmp_path = history_path.with_suffix(".json.tmp")
         tmp_path.write_text(
-            json.dumps(asdict(self._data), ensure_ascii=False, indent=2),
+            json.dumps(self._data.to_dict(), ensure_ascii=False, indent=2),
             encoding="utf-8",
         )
         tmp_path.replace(history_path)
@@ -281,12 +367,10 @@ class DataManager:
             state: State to persist.
 
         Raises:
-            ValueError: The state date or timezone is invalid.
-            ZoneInfoNotFoundError: The state timezone does not exist.
+            ValueError: The state date is invalid.
             OSError: The current state cannot be written.
         """
         datetime.date.fromisoformat(state.date)
-        zoneinfo.ZoneInfo(state.timezone)
 
         previous = self._data
         self._data = state
@@ -320,7 +404,7 @@ class DataManager:
         self._path.parent.mkdir(parents=True, exist_ok=True)
         tmp_path = self._path.with_suffix(".tmp")
         tmp_path.write_text(
-            json.dumps(asdict(self._data), ensure_ascii=False, indent=2),
+            json.dumps(self._data.to_dict(), ensure_ascii=False, indent=2),
             encoding="utf-8",
         )
         tmp_path.replace(self._path)

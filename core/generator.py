@@ -2,19 +2,21 @@ import asyncio
 import datetime
 import json
 import re
-import zoneinfo
 from pathlib import Path
+
+import holidays
 
 from astrbot.api import logger
 from astrbot.core.config.astrbot_config import AstrBotConfig
 from astrbot.core.star.context import Context
 
 from .state import (
+    CHINA_TIMEZONE,
     MAX_HISTORY_DAYS,
+    OPTIONAL_TIMELINE_FIELDS,
     DataManager,
     LifeState,
     TimelineEntry,
-    is_valid_time_slot,
 )
 
 _SCHEMA_PATH = Path(__file__).resolve().parent.parent / "_conf_schema.json"
@@ -22,6 +24,7 @@ _LEGACY_PROMPT_PLACEHOLDERS = (
     "{business_date}",
     "{cycle_start}",
     "{cycle_end}",
+    "{timezone}",
 )
 
 
@@ -88,7 +91,7 @@ class Generator:
             ):
                 logger.warning(
                     "[DynamicLifeState] Legacy prompt placeholders detected; "
-                    "using the v0.2.0 default prompt until the custom template "
+                    "using the current default prompt until the custom template "
                     "is updated"
                 )
                 return _load_default_prompt_template()
@@ -126,19 +129,16 @@ class Generator:
                         f"  - 穿搭：{entry.outfit or '无'}",
                     ]
                 )
-                if entry.mood:
-                    lines.append(f"  - 心情：{entry.mood}")
-                if entry.location:
-                    lines.append(f"  - 地点：{entry.location}")
-                if entry.note:
-                    lines.append(f"  - 备注：{entry.note}")
+                for key, spec in OPTIONAL_TIMELINE_FIELDS.items():
+                    value = entry.extra_fields.get(key)
+                    if value:
+                        lines.append(f"  - {spec['label']}：{value}")
             sections.append("\n".join(lines))
         return "\n\n".join(sections)
 
     async def generate(
         self,
         target_date: datetime.date,
-        timezone: zoneinfo.ZoneInfo,
         force: bool = False,
         extra: str | None = None,
     ) -> LifeState:
@@ -146,7 +146,6 @@ class Generator:
 
         Args:
             target_date: Natural date captured by the generation caller.
-            timezone: Configured IANA timezone for the state.
             force: Whether to replace an existing successful state.
             extra: Optional user requirements for forced regeneration.
 
@@ -155,11 +154,10 @@ class Generator:
         """
         async with self._gen_lock:
             date = target_date.isoformat()
-            timezone_name = timezone.key
 
             # Re-check after waiting for the lock to deduplicate concurrent callers.
             if not force:
-                existing = self.data_mgr.get_current(date, timezone_name)
+                existing = self.data_mgr.get_current(date)
                 if existing and existing.status == "ok":
                     return existing
 
@@ -168,7 +166,7 @@ class Generator:
             try:
                 logger.info(
                     f"[DynamicLifeState] Generating life state for {date} "
-                    f"in {timezone_name}"
+                    f"in {CHINA_TIMEZONE.key}"
                 )
 
                 self.data_mgr.archive_before_generation(date)
@@ -183,6 +181,22 @@ class Generator:
                 )
                 history_text = self._format_history(history_states)
                 extra_text = (extra or "").strip() or "无"
+                holiday = "无"
+                try:
+                    holiday_calendar = holidays.country_holidays(
+                        "CN",
+                        years=target_date.year,
+                        observed=False,
+                        language="zh_CN",
+                    )
+                    holiday = (
+                        str(holiday_calendar.get(target_date) or "无").strip() or "无"
+                    )
+                except Exception as e:
+                    logger.warning(
+                        f"[DynamicLifeState] Failed to resolve holiday for "
+                        f"country='CN', date={date}: {e}; using no holiday"
+                    )
 
             except Exception as e:
                 logger.error(
@@ -191,9 +205,8 @@ class Generator:
                 )
                 return LifeState(
                     date=date,
-                    timezone=timezone_name,
                     status="failed",
-                    generated_at=datetime.datetime.now(timezone).isoformat(),
+                    generated_at=datetime.datetime.now(CHINA_TIMEZONE).isoformat(),
                 )
 
             try:
@@ -201,10 +214,14 @@ class Generator:
                 prompt = _render_template(
                     self._get_prompt_template(),
                     date=date,
-                    timezone=timezone_name,
+                    holiday=holiday,
                     persona=persona,
                     history_states=history_text,
                     extra_requirements=extra_text,
+                    timeline_optional_fields="、".join(
+                        f"{name}（{spec['label']}）"
+                        for name, spec in OPTIONAL_TIMELINE_FIELDS.items()
+                    ),
                 )
 
                 if debug:
@@ -222,21 +239,20 @@ class Generator:
                     logger.info(f"[DynamicLifeState] Raw model response:\n{text}")
 
                 payload = self._extract_json(text)
-                generated_at = datetime.datetime.now(timezone).isoformat()
+                generated_at = datetime.datetime.now(CHINA_TIMEZONE).isoformat()
                 state = self._validate_and_build(
                     payload,
                     target_date,
-                    timezone,
                     generated_at,
+                    holiday,
                 )
 
             except Exception as e:
                 logger.error(f"[DynamicLifeState] Generation failed for {date}: {e}")
                 failed = LifeState(
                     date=date,
-                    timezone=timezone_name,
                     status="failed",
-                    generated_at=datetime.datetime.now(timezone).isoformat(),
+                    generated_at=datetime.datetime.now(CHINA_TIMEZONE).isoformat(),
                 )
                 try:
                     self.data_mgr.set(failed)
@@ -256,15 +272,14 @@ class Generator:
                 )
                 return LifeState(
                     date=date,
-                    timezone=timezone_name,
                     status="failed",
-                    generated_at=datetime.datetime.now(timezone).isoformat(),
+                    generated_at=datetime.datetime.now(CHINA_TIMEZONE).isoformat(),
                 )
 
             if debug:
                 logger.info(
                     f"[DynamicLifeState] Parsed state:\n"
-                    f"{json.dumps(self._state_to_dict(state), ensure_ascii=False, indent=2)}"
+                    f"{json.dumps(state.to_dict(), ensure_ascii=False, indent=2)}"
                 )
 
             logger.info(
@@ -393,16 +408,16 @@ class Generator:
     def _validate_and_build(
         payload: dict | None,
         target_date: datetime.date,
-        timezone: zoneinfo.ZoneInfo,
         generated_at: str,
+        holiday: str,
     ) -> LifeState:
         """Validate model JSON and build a natural-date state.
 
         Args:
             payload: Parsed model JSON.
             target_date: Date requested by the caller.
-            timezone: Configured timezone for the generated state.
             generated_at: Actual generation completion timestamp.
+            holiday: Holiday name resolved by the plugin.
 
         Returns:
             Validated life state.
@@ -429,23 +444,9 @@ class Generator:
         for item in timeline_raw:
             if not isinstance(item, dict):
                 continue
-            time_val = item.get("time")
-            schedule_val = item.get("schedule")
-            outfit_val = item.get("outfit")
-            if not time_val or not schedule_val or not outfit_val:
-                continue
-            if not is_valid_time_slot(str(time_val)):
-                continue
-            entries.append(
-                TimelineEntry(
-                    time=str(time_val),
-                    schedule=str(schedule_val),
-                    outfit=str(outfit_val),
-                    mood=str(item.get("mood", "")),
-                    location=str(item.get("location", "")),
-                    note=str(item.get("note", "")),
-                )
-            )
+            entry = TimelineEntry.from_dict(item)
+            if entry is not None:
+                entries.append(entry)
 
         if not entries:
             raise ValueError(
@@ -454,40 +455,10 @@ class Generator:
 
         return LifeState(
             date=date,
-            timezone=timezone.key,
+            holiday=holiday,
             schedule_summary=str(payload.get("schedule_summary", "")),
             style_summary=str(payload.get("style_summary", "")),
             timeline=entries,
             status="ok",
             generated_at=generated_at,
         )
-
-    @staticmethod
-    def _state_to_dict(state: LifeState) -> dict:
-        """Convert a generated state into a debug payload.
-
-        Args:
-            state: Generated life state.
-
-        Returns:
-            JSON-compatible state mapping.
-        """
-        return {
-            "date": state.date,
-            "timezone": state.timezone,
-            "schedule_summary": state.schedule_summary,
-            "style_summary": state.style_summary,
-            "timeline": [
-                {
-                    "time": e.time,
-                    "schedule": e.schedule,
-                    "outfit": e.outfit,
-                    "mood": e.mood,
-                    "location": e.location,
-                    "note": e.note,
-                }
-                for e in state.timeline
-            ],
-            "status": state.status,
-            "generated_at": state.generated_at,
-        }

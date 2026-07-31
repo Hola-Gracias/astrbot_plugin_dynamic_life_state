@@ -3,6 +3,7 @@ import json as _json
 import uuid
 
 from .state import (
+    OPTIONAL_TIMELINE_FIELDS,
     LifeState,
     SlotMatch,
     format_datetime,
@@ -29,7 +30,7 @@ def build_injection_text(
     Args:
         state: Current natural-date life state.
         current_match: Timeline entry matching the current local time.
-        now: Current date and time in the configured timezone.
+        now: Current Beijing date and time.
 
     Returns:
         Text to inject into the LLM request.
@@ -43,12 +44,10 @@ def build_injection_text(
         slot_label = current_match.entry.time
         schedule_label = current_match.entry.schedule
         outfit_label = current_match.entry.outfit
-        if current_match.entry.mood:
-            optional_labels.append(f"当前心情: {current_match.entry.mood}\n")
-        if current_match.entry.location:
-            optional_labels.append(f"当前位置: {current_match.entry.location}\n")
-        if current_match.entry.note:
-            optional_labels.append(f"当前备注: {current_match.entry.note}\n")
+        for key, spec in OPTIONAL_TIMELINE_FIELDS.items():
+            value = current_match.entry.extra_fields.get(key)
+            if value:
+                optional_labels.append(f"当前{spec['label']}: {value}\n")
         if current_match.active_interval:
             interval_label = format_interval(current_match.active_interval)
 
@@ -57,7 +56,7 @@ def build_injection_text(
         f"这是你当前的生活状态，可供参考\n"
         f"话题无关时无需主动提及\n"
         f"日期: {state.date}\n"
-        f"时区: {state.timezone}\n"
+        f"今日节日: {state.holiday or '无'}\n"
         f"当前日期时间: {format_datetime(now)}\n"
         f"今日概况: {state.schedule_summary or '无'}\n"
         f"今日氛围: {state.style_summary or '无'}\n"
@@ -85,15 +84,15 @@ def build_state_json(
     Args:
         state: Current natural-date life state.
         current_match: Timeline entry matching the current local time.
-        now: Current date and time in the configured timezone.
+        now: Current Beijing date and time.
 
     Returns:
         JSON-compatible current-state payload.
     """
     entry = current_match.entry if current_match else None
-    return {
+    payload = {
         "date": state.date,
-        "timezone": state.timezone,
+        "holiday": state.holiday or "无",
         "current_datetime": now.isoformat(),
         "schedule_summary": state.schedule_summary,
         "style_summary": state.style_summary,
@@ -105,10 +104,13 @@ def build_state_json(
         ),
         "current_schedule": entry.schedule if entry else "",
         "current_outfit": entry.outfit if entry else "",
-        "current_mood": entry.mood if entry else "",
-        "current_location": entry.location if entry else "",
-        "current_note": entry.note if entry else "",
     }
+    if entry:
+        for key in OPTIONAL_TIMELINE_FIELDS:
+            value = entry.extra_fields.get(key)
+            if value:
+                payload[f"current_{key}"] = value
+    return payload
 
 
 def build_fake_tool_call(
@@ -121,7 +123,7 @@ def build_fake_tool_call(
     Args:
         state: Current natural-date life state.
         current_match: Timeline entry matching the current local time.
-        now: Current date and time in the configured timezone.
+        now: Current Beijing date and time.
 
     Returns:
         Assistant and tool messages.

@@ -1,6 +1,5 @@
 import datetime
 import re
-import zoneinfo
 from collections.abc import AsyncGenerator
 
 from apscheduler.executors.asyncio import AsyncIOExecutor
@@ -21,7 +20,9 @@ from .core.injector import (
     remove_fake_tool_call_from_context,
 )
 from .core.state import (
+    CHINA_TIMEZONE,
     NATURAL_SLOT_NAMES,
+    OPTIONAL_TIMELINE_FIELDS,
     DataManager,
     LifeState,
     SlotMatch,
@@ -64,7 +65,6 @@ class DynamicLifeStatePlugin(Star):
 
     async def initialize(self) -> None:
         """Initialize storage, generation, and midnight scheduling."""
-        self.timezone = self._resolve_timezone()
         self.data_mgr = DataManager(self.state_file)
         self.generator = Generator(self.context, self.config, self.data_mgr)
         self._start_scheduler()
@@ -77,31 +77,15 @@ class DynamicLifeStatePlugin(Star):
     # Scheduler
     # =========================
 
-    def _resolve_timezone(self) -> zoneinfo.ZoneInfo:
-        """Resolve the configured timezone with a safe default.
-
-        Returns:
-            Configured IANA timezone or Asia/Shanghai.
-        """
-        tz_setting = str(self.config.get("timezone") or "Asia/Shanghai").strip()
-        try:
-            return zoneinfo.ZoneInfo(tz_setting)
-        except (ValueError, zoneinfo.ZoneInfoNotFoundError):
-            logger.error(
-                f"[DynamicLifeState] Invalid timezone {tz_setting!r}; "
-                "falling back to Asia/Shanghai"
-            )
-            return zoneinfo.ZoneInfo("Asia/Shanghai")
-
     def _now(self) -> datetime.datetime:
-        """Return the current time in the configured timezone."""
-        return datetime.datetime.now(self.timezone)
+        """Return the current time in China Standard Time."""
+        return datetime.datetime.now(CHINA_TIMEZONE)
 
     def _current_date(
         self,
         now: datetime.datetime | None = None,
     ) -> datetime.date:
-        """Return the local date in the configured timezone.
+        """Return the China Standard Time date.
 
         Args:
             now: Optional time supplied by a caller or test.
@@ -111,16 +95,16 @@ class DynamicLifeStatePlugin(Star):
         """
         value = now or self._now()
         if value.tzinfo is None:
-            value = value.replace(tzinfo=self.timezone)
+            value = value.replace(tzinfo=CHINA_TIMEZONE)
         else:
-            value = value.astimezone(self.timezone)
+            value = value.astimezone(CHINA_TIMEZONE)
         return value.date()
 
     def _select_current_state(
         self,
         now: datetime.datetime,
     ) -> tuple[LifeState | None, datetime.date]:
-        """Select a successful state for the configured local date.
+        """Select a successful state for the current Beijing date.
 
         Args:
             now: Current date and time.
@@ -129,10 +113,7 @@ class DynamicLifeStatePlugin(Star):
             Matching state, if any, and the captured target date.
         """
         target_date = self._current_date(now)
-        state = self.data_mgr.get_current(
-            target_date.isoformat(),
-            self.timezone.key,
-        )
+        state = self.data_mgr.get_current(target_date.isoformat())
         if state is None or state.status != "ok":
             return None, target_date
         return state, target_date
@@ -141,7 +122,7 @@ class DynamicLifeStatePlugin(Star):
         """Start the fixed local-midnight scheduler."""
         try:
             self._scheduler = AsyncIOScheduler(
-                timezone=self.timezone,
+                timezone=CHINA_TIMEZONE,
                 executors={"default": AsyncIOExecutor()},
                 job_defaults={
                     "coalesce": True,
@@ -159,7 +140,7 @@ class DynamicLifeStatePlugin(Star):
             self._scheduler.start()
             logger.info(
                 f"[DynamicLifeState] Scheduler started for daily generation "
-                f"at 00:00 in {self.timezone.key}"
+                f"at 00:00 in {CHINA_TIMEZONE.key}"
             )
         except Exception as e:
             logger.error(f"[DynamicLifeState] Scheduler startup failed: {e}")
@@ -173,7 +154,7 @@ class DynamicLifeStatePlugin(Star):
             pass
 
     async def _daily_generate(self) -> None:
-        """Generate the configured timezone's current date state."""
+        """Generate the current China Standard Time date state."""
         now = self._now()
         data, target_date = self._select_current_state(now)
         if data:
@@ -182,7 +163,7 @@ class DynamicLifeStatePlugin(Star):
                 "already exists; skipping generation"
             )
             return
-        await self.generator.generate(target_date, self.timezone)
+        await self.generator.generate(target_date)
 
     # =========================
     # LLM request hook
@@ -210,7 +191,7 @@ class DynamicLifeStatePlugin(Star):
         if data is None:
             if self.generator.is_generating:
                 return  # Skip injection while the shared generation task runs.
-            data = await self.generator.generate(target_date, self.timezone)
+            data = await self.generator.generate(target_date)
 
         if not data or data.status == "failed":
             return
@@ -339,10 +320,8 @@ class DynamicLifeStatePlugin(Star):
     ) -> str:
         """获取 Bot 当前或指定日期的完整生活状态。
 
-        date 参数为可选，格式 YYYY-MM-DD，表示配置时区下的日期。
-        不传则返回今天的状态。
+        date 参数为可选，格式 YYYY-MM-DD。不传则默认返回今天的状态。
         仅在用户明确询问"今天一整天在做什么""全天状态""完整日程""其他时间段的安排""回顾某天的状态"或类似问题时调用。
-        普通日常对话中不要调用此工具，LLM 请求时已有的当前时段状态已足够回答问题。
 
         Args:
             date (string): 可选的 YYYY-MM-DD 日期。
@@ -416,10 +395,7 @@ class DynamicLifeStatePlugin(Star):
         time_label = "当前时段" if show_current else "时段"
         schedule_label = "当前安排" if show_current else "安排"
         outfit_label = "当前穿搭" if show_current else "穿搭"
-        lines = [
-            f"📅 日期：{state.date}",
-            f"🌐 时区：{state.timezone}",
-        ]
+        lines = [f"📅 日期：{state.date}"]
         if current_datetime is not None:
             datetime_label = "当前日期时间" if show_current else "日期时间"
             lines.append(f"🗓️ {datetime_label}：{format_datetime(current_datetime)}")
@@ -431,12 +407,10 @@ class DynamicLifeStatePlugin(Star):
                 f"👗 {outfit_label}：{match.entry.outfit}",
             ]
         )
-        if match.entry.mood:
-            lines.append(f"🙂 心情：{match.entry.mood}")
-        if match.entry.location:
-            lines.append(f"📍 地点：{match.entry.location}")
-        if match.entry.note:
-            lines.append(f"🗒️ 备注：{match.entry.note}")
+        for key, spec in OPTIONAL_TIMELINE_FIELDS.items():
+            value = match.entry.extra_fields.get(key)
+            if value:
+                lines.append(f"{spec['icon']} {spec['label']}：{value}")
         lines.append(f"⏰ 实际生成时间：{state.generated_at or '未知'}")
         return "\n".join(lines)
 
@@ -454,7 +428,6 @@ class DynamicLifeStatePlugin(Star):
         """
         lines = [
             f"📅 日期：{state.date}",
-            f"🌐 时区：{state.timezone}",
             f"📝 今日概况：{state.schedule_summary or '无'}",
             f"🎨 今日氛围：{state.style_summary or '无'}",
             f"⏰ 实际生成时间：{state.generated_at or '未知'}",
@@ -469,12 +442,10 @@ class DynamicLifeStatePlugin(Star):
                 f"{entry.schedule} | 👗 {entry.outfit}"
             )
             details = []
-            if entry.mood:
-                details.append(f"🙂 {entry.mood}")
-            if entry.location:
-                details.append(f"📍 {entry.location}")
-            if entry.note:
-                details.append(f"🗒️ {entry.note}")
+            for key, spec in OPTIONAL_TIMELINE_FIELDS.items():
+                value = entry.extra_fields.get(key)
+                if value:
+                    details.append(f"{spec['icon']} {value}")
             if details:
                 lines.append(f"    {' | '.join(details)}")
         return "\n".join(lines)
@@ -534,7 +505,7 @@ class DynamicLifeStatePlugin(Star):
         data, target_date = self._select_current_state(now)
         if data is None:
             yield event.plain_result("今天的状态尚未生成，正在生成...")
-            data = await self.generator.generate(target_date, self.timezone)
+            data = await self.generator.generate(target_date)
 
         if not data or data.status == "failed":
             yield event.plain_result("状态生成失败，请稍后再试或使用 /dls regen 重试。")
@@ -580,7 +551,7 @@ class DynamicLifeStatePlugin(Star):
         query_datetime = datetime.datetime.combine(
             target_date,
             datetime.time(query_hour, query_minute_part),
-            tzinfo=self.timezone,
+            tzinfo=CHINA_TIMEZONE,
         )
         match = select_current_slot(data.timeline, query_minute)
         if match is None:
@@ -636,7 +607,7 @@ class DynamicLifeStatePlugin(Star):
                 yield event.plain_result("状态正在生成中，请稍后再试。")
                 return
             yield event.plain_result("今天的状态尚未生成，正在生成...")
-            data = await self.generator.generate(target_date, self.timezone)
+            data = await self.generator.generate(target_date)
 
         if not data or data.status == "failed":
             yield event.plain_result("当前暂无有效状态。")
@@ -675,7 +646,6 @@ class DynamicLifeStatePlugin(Star):
 
         data = await self.generator.generate(
             target_date,
-            self.timezone,
             force=True,
             extra=extra,
         )
