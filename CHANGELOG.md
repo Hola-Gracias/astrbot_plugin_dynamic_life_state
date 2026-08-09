@@ -1,5 +1,27 @@
 # Changelog
 
+## [0.3.1] - 2026-08-06
+
+### Added
+
+- 指令和 LLM Tool 输出新增节日行：`/dls show`、`/dls full` 和 `get_full_dynamic_life_state` 在日期后显示 `🎉 节日：<节日名>`，非节日为“无”。
+- 新增 `GenerationResult` 结果对象（`succeeded`、`state`、`error`、`used_previous_state`、`auto_retries_exhausted`），生成结果与操作结果分离，不再用 `LifeState(status="failed")` 表达操作失败。
+
+### Changed
+
+- 强制重新生成失败时保留当天原有成功状态：`/dls regen` 回复“重新生成失败，已保留原状态”并展示旧状态，不再用失败状态覆盖原本可用的当天状态。
+- 自动生成失败不再持久化 `status == "failed"` 的标记状态。
+- 每个自然日自动生成最多尝试 3 次，达到上限后自动路径不再调用 LLM，只能通过 `/dls regen` 手动重试；失败计数仅保存在内存中，插件重载（如修改配置触发 AstrBot 重载插件）后自动清零，`/dls regen` 不受次数限制且其失败不计入自动次数。
+- `/dls show` 和 `/dls full` 在自动生成达上限时提示“今日自动生成次数已达上限，请使用 /dls regen 手动重试”。
+- `fake_tool_call` 注入方式改为复用与 `extra_user_content_parts` 相同的 `<life_state>` 文本，两种注入方式内容完全一致，仅载体不同；移除了独立的 JSON payload 和 `current_*` 键。
+
+[0.3.1]: https://github.com/Hola-Gracias/astrbot_plugin_dynamic_life_state/compare/v0.3.0...v0.3.1
+
+---
+
+<details>
+<summary>📋 历史更新日志</summary>
+
 ## [0.3.0] - 2026-07-30
 
 ### ⚠️ 注意
@@ -44,9 +66,6 @@
 [0.3.0]: https://github.com/Hola-Gracias/astrbot_plugin_dynamic_life_state/compare/v0.2.0...v0.3.0
 
 ---
-
-<details>
-<summary>📋 历史更新日志</summary>
 
 ## [0.2.0] - 2026-07-30
 
