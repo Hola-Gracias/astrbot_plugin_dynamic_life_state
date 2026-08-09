@@ -1,5 +1,4 @@
 import datetime
-import json as _json
 import uuid
 
 from .state import (
@@ -25,15 +24,15 @@ def build_injection_text(
     current_match: SlotMatch | None,
     now: datetime.datetime,
 ) -> str:
-    """Build the temporary ``<life_state>`` context block.
+    """构建临时的 ``<life_state>`` 上下文块。
 
     Args:
-        state: Current natural-date life state.
-        current_match: Timeline entry matching the current local time.
-        now: Current Beijing date and time.
+        state: 当前自然日期的生活状态。
+        current_match: 匹配当前本地时间的时间线条目。
+        now: 当前北京时间。
 
     Returns:
-        Text to inject into the LLM request.
+        要注入到 LLM 请求中的文本。
     """
     slot_label = "无"
     schedule_label = "无"
@@ -74,61 +73,25 @@ def build_injection_text(
 # =========================
 
 
-def build_state_json(
-    state: LifeState,
-    current_match: SlotMatch | None,
-    now: datetime.datetime,
-) -> dict:
-    """Build the fake tool-call result payload.
-
-    Args:
-        state: Current natural-date life state.
-        current_match: Timeline entry matching the current local time.
-        now: Current Beijing date and time.
-
-    Returns:
-        JSON-compatible current-state payload.
-    """
-    entry = current_match.entry if current_match else None
-    payload = {
-        "date": state.date,
-        "holiday": state.holiday or "无",
-        "current_datetime": now.isoformat(),
-        "schedule_summary": state.schedule_summary,
-        "style_summary": state.style_summary,
-        "current_time_slot": entry.time if entry else "",
-        "current_time_interval": (
-            format_interval(current_match.active_interval)
-            if current_match and current_match.active_interval
-            else ""
-        ),
-        "current_schedule": entry.schedule if entry else "",
-        "current_outfit": entry.outfit if entry else "",
-    }
-    if entry:
-        for key in OPTIONAL_TIMELINE_FIELDS:
-            value = entry.extra_fields.get(key)
-            if value:
-                payload[f"current_{key}"] = value
-    return payload
-
-
 def build_fake_tool_call(
     state: LifeState,
     current_match: SlotMatch | None,
     now: datetime.datetime,
 ) -> list[dict]:
-    """Format the current state as an OpenAI-style fake tool call.
+    """将当前状态格式化为 OpenAI 风格的伪工具调用。
+
+    工具响应携带的 ``<life_state>`` 文本与
+    ``extra_user_content_parts`` 注入方式相同，仅传递方式不同。
 
     Args:
-        state: Current natural-date life state.
-        current_match: Timeline entry matching the current local time.
-        now: Current Beijing date and time.
+        state: 当前自然日期的生活状态。
+        current_match: 匹配当前本地时间的时间线条目。
+        now: 当前北京时间。
 
     Returns:
-        Assistant and tool messages.
+        assistant 和 tool 消息列表。
     """
-    state_json = build_state_json(state, current_match, now)
+    inject_text = build_injection_text(state, current_match, now)
     call_id = f"{FAKE_TOOL_CALL_ID_PREFIX}{uuid.uuid4().hex[:12]}"
 
     assistant_msg = {
@@ -150,7 +113,7 @@ def build_fake_tool_call(
         "role": "tool",
         "tool_call_id": call_id,
         "name": FAKE_TOOL_CALL_NAME,
-        "content": _json.dumps(state_json, ensure_ascii=False),
+        "content": inject_text,
     }
 
     return [assistant_msg, tool_msg]
@@ -162,10 +125,10 @@ def build_fake_tool_call(
 
 
 def remove_fake_tool_call_from_context(contexts: list[dict]) -> None:
-    """Remove a previous fake life-state tool call from request context.
+    """从请求上下文中移除上一次的伪生活状态工具调用。
 
     Args:
-        contexts: Mutable provider context messages.
+        contexts: 可变的 provider 上下文消息列表。
     """
     if not contexts:
         return
