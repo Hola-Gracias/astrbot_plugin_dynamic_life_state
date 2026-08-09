@@ -37,17 +37,17 @@ from .core.state import (
 
 
 def _extract_args_after(message_str: str, command: str) -> str | None:
-    """Extract the complete trailing text after a command.
+    """提取命令之后的完整尾随文本。
 
     Args:
-        message_str: Raw event message.
-        command: Command prefix without the leading slash.
+        message_str: 原始事件消息。
+        command: 命令前缀（不含前导斜杠）。
 
     Returns:
-        Trailing text, or ``None`` when no extra text is present.
+        尾随文本，没有额外文本时返回 ``None``。
     """
     text = message_str.lstrip("/").strip()
-    text = re.sub(r"\s+", " ", text)  # Normalize whitespace for command matching.
+    text = re.sub(r"\s+", " ", text)  # 规范化空白以便命令匹配。
     prefix = f"{command} "
     idx = text.find(prefix)
     if idx == -1:
@@ -64,13 +64,13 @@ class DynamicLifeStatePlugin(Star):
         self.state_file = self.data_dir / "life_state.json"
 
     async def initialize(self) -> None:
-        """Initialize storage, generation, and midnight scheduling."""
+        """初始化存储、生成器和午夜定时调度。"""
         self.data_mgr = DataManager(self.state_file)
         self.generator = Generator(self.context, self.config, self.data_mgr)
         self._start_scheduler()
 
     async def terminate(self) -> None:
-        """Stop midnight scheduling."""
+        """停止午夜定时调度。"""
         self._stop_scheduler()
 
     # =========================
@@ -78,20 +78,20 @@ class DynamicLifeStatePlugin(Star):
     # =========================
 
     def _now(self) -> datetime.datetime:
-        """Return the current time in China Standard Time."""
+        """返回中国标准时间的当前日期时间。"""
         return datetime.datetime.now(CHINA_TIMEZONE)
 
     def _current_date(
         self,
         now: datetime.datetime | None = None,
     ) -> datetime.date:
-        """Return the China Standard Time date.
+        """返回中国标准时间的日期。
 
         Args:
-            now: Optional time supplied by a caller or test.
+            now: 可选的时间，由调用方或测试提供。
 
         Returns:
-            Local date.
+            本地日期。
         """
         value = now or self._now()
         if value.tzinfo is None:
@@ -104,13 +104,13 @@ class DynamicLifeStatePlugin(Star):
         self,
         now: datetime.datetime,
     ) -> tuple[LifeState | None, datetime.date]:
-        """Select a successful state for the current Beijing date.
+        """为当前北京时间选取一个成功生成的状态。
 
         Args:
-            now: Current date and time.
+            now: 当前日期时间。
 
         Returns:
-            Matching state, if any, and the captured target date.
+            匹配的状态（如果有）和捕获的目标日期。
         """
         target_date = self._current_date(now)
         state = self.data_mgr.get_current(target_date.isoformat())
@@ -119,7 +119,7 @@ class DynamicLifeStatePlugin(Star):
         return state, target_date
 
     def _start_scheduler(self) -> None:
-        """Start the fixed local-midnight scheduler."""
+        """启动固定的本地午夜定时调度器。"""
         try:
             self._scheduler = AsyncIOScheduler(
                 timezone=CHINA_TIMEZONE,
@@ -146,7 +146,7 @@ class DynamicLifeStatePlugin(Star):
             logger.error(f"[DynamicLifeState] Scheduler startup failed: {e}")
 
     def _stop_scheduler(self) -> None:
-        """Stop the scheduler when it is running."""
+        """停止正在运行的定时调度器。"""
         try:
             if hasattr(self, "_scheduler") and self._scheduler.running:
                 self._scheduler.shutdown()
@@ -154,7 +154,7 @@ class DynamicLifeStatePlugin(Star):
             pass
 
     async def _daily_generate(self) -> None:
-        """Generate the current China Standard Time date state."""
+        """生成当前中国标准时间日期的状态。"""
         now = self._now()
         data, target_date = self._select_current_state(now)
         if data:
@@ -175,14 +175,14 @@ class DynamicLifeStatePlugin(Star):
         event: AstrMessageEvent,
         req: ProviderRequest,
     ) -> None:
-        """Inject the current time slot before each enabled LLM request.
+        """在每次启用的 LLM 请求前注入当前时段状态。
 
         Args:
-            event: Incoming AstrBot message event.
-            req: Mutable provider request.
+            event: 传入的 AstrBot 消息事件。
+            req: 可变的 provider 请求。
         """
 
-        # Session filter
+        # 会话过滤
         if not self._is_session_enabled(event.unified_msg_origin):
             return
 
@@ -190,25 +190,25 @@ class DynamicLifeStatePlugin(Star):
         data, target_date = self._select_current_state(now)
         if data is None:
             if self.generator.is_generating:
-                return  # Skip injection while the shared generation task runs.
-            data = await self.generator.generate(target_date)
+                return  # 共享生成任务执行期间跳过注入。
+            result = await self.generator.generate(target_date)
+            if not result.succeeded or result.state is None:
+                return  # 无可用的有效状态时跳过注入。
+            data = result.state
 
-        if not data or data.status == "failed":
-            return
-
-        # Select the current slot.
+        # 选取当前时段。
         current_match = select_current_slot(data.timeline, minute_of_day(now))
 
-        # Resolve the configured injection method.
+        # 解析配置的注入方式。
         injection_method = str(
             self.config.get("injection_mode", "extra_user_content_parts")
         )
         injection_method = self._resolve_injection_method(req, injection_method)
 
-        # Remove a previous fake injection.
+        # 移除上一次的伪注入。
         self._cleanup_previous_injection(req)
 
-        # Inject the current state.
+        # 注入当前状态。
         if injection_method == "extra_user_content_parts":
             inject_text = build_injection_text(data, current_match, now)
             req.extra_user_content_parts.append(
@@ -238,13 +238,13 @@ class DynamicLifeStatePlugin(Star):
     # =========================
 
     def _is_session_enabled(self, unified_msg_origin: str) -> bool:
-        """Return whether life-state injection is enabled for a session.
+        """返回当前会话是否启用了生活状态注入。
 
         Args:
-            unified_msg_origin: AstrBot unified message origin.
+            unified_msg_origin: AstrBot 统一消息来源。
 
         Returns:
-            Whether the session passes the configured list mode.
+            会话是否通过配置的列表模式检查。
         """
         mode = str(self.config.get("session_list_mode", "whitelist")).strip()
         session_list: list[str] = list(self.config.get("session_list", []) or [])
@@ -268,14 +268,14 @@ class DynamicLifeStatePlugin(Star):
     # =========================
 
     def _resolve_injection_method(self, req: ProviderRequest, configured: str) -> str:
-        """Fall back when a provider cannot accept fake tool calls.
+        """当 provider 不支持伪工具调用时回退到备选方式。
 
         Args:
-            req: Provider request used to resolve the active provider.
-            configured: Configured injection method.
+            req: 用于解析当前 provider 的请求对象。
+            configured: 配置的注入方式。
 
         Returns:
-            Compatible injection method.
+            兼容的注入方式。
         """
         if configured != "fake_tool_call":
             return configured
@@ -303,10 +303,10 @@ class DynamicLifeStatePlugin(Star):
     # =========================
 
     def _cleanup_previous_injection(self, req: ProviderRequest) -> None:
-        """Remove an earlier fake tool-call injection.
+        """移除上一次的伪工具调用注入。
 
         Args:
-            req: Mutable provider request.
+            req: 可变的 provider 请求。
         """
         remove_fake_tool_call_from_context(req.contexts)
 
@@ -363,13 +363,13 @@ class DynamicLifeStatePlugin(Star):
 
     @staticmethod
     def _format_match_intervals(match: SlotMatch) -> str:
-        """Format all intervals exposed by a slot match.
+        """格式化时段匹配中的所有区间。
 
         Args:
-            match: Matched timeline slot.
+            match: 匹配到的时间线条目。
 
         Returns:
-            Human-readable interval list.
+            人类可读的区间列表。
         """
         return "、".join(format_interval(interval) for interval in match.intervals)
 
@@ -381,21 +381,24 @@ class DynamicLifeStatePlugin(Star):
         current_datetime: datetime.datetime | None = None,
         show_current: bool = True,
     ) -> str:
-        """Format a current or queried time-slot state.
+        """格式化当前或查询的时段状态。
 
         Args:
-            state: Life state for one date.
-            match: Selected time slot.
-            current_datetime: Optional clock time to display.
-            show_current: Whether labels should describe the current moment.
+            state: 某一天的生活状态。
+            match: 选中的时段。
+            current_datetime: 可选的要显示的时钟时间。
+            show_current: 标签是否应描述"当前"时刻。
 
         Returns:
-            Human-readable state text.
+            人类可读的状态文本。
         """
         time_label = "当前时段" if show_current else "时段"
         schedule_label = "当前安排" if show_current else "安排"
         outfit_label = "当前穿搭" if show_current else "穿搭"
-        lines = [f"📅 日期：{state.date}"]
+        lines = [
+            f"📅 日期：{state.date}",
+            f"🎉 节日：{state.holiday}",
+        ]
         if current_datetime is not None:
             datetime_label = "当前日期时间" if show_current else "日期时间"
             lines.append(f"🗓️ {datetime_label}：{format_datetime(current_datetime)}")
@@ -418,16 +421,17 @@ class DynamicLifeStatePlugin(Star):
         self,
         state: LifeState,
     ) -> str:
-        """Format the complete state for one date.
+        """格式化某一天的完整状态。
 
         Args:
-            state: Life state for one date.
+            state: 某一天的生活状态。
 
         Returns:
-            Human-readable complete state.
+            人类可读的完整状态。
         """
         lines = [
             f"📅 日期：{state.date}",
+            f"🎉 节日：{state.holiday}",
             f"📝 今日概况：{state.schedule_summary or '无'}",
             f"🎨 今日氛围：{state.style_summary or '无'}",
             f"⏰ 实际生成时间：{state.generated_at or '未知'}",
@@ -456,7 +460,7 @@ class DynamicLifeStatePlugin(Star):
 
     @filter.command_group("dls")
     def dls(self) -> None:
-        """Register the dynamic life-state command group."""
+        """注册动态生活状态命令组。"""
         pass
 
     @dls.command("show")
@@ -466,18 +470,18 @@ class DynamicLifeStatePlugin(Star):
         event: AstrMessageEvent,
         time_query: str = "",
     ) -> AsyncGenerator[object, None]:
-        """Show the current or a queried time-slot state.
+        """显示当前或指定查询时间的时段状态。
 
         Args:
-            event: Current AstrBot message event.
-            time_query: Optional natural slot name or HH:MM clock time.
+            event: 当前 AstrBot 消息事件。
+            time_query: 可选的自然时段名称或 HH:MM 格式的时间。
 
         Yields:
-            AstrBot plain-text command results.
+            AstrBot 纯文本命令结果。
         """
         time_query = time_query.strip()
 
-        # Validate before loading state or invoking the LLM.
+        # 加载状态或调用 LLM 之前先做校验。
         if time_query:
             if time_query in NATURAL_SLOT_NAMES:
                 pass
@@ -505,17 +509,24 @@ class DynamicLifeStatePlugin(Star):
         data, target_date = self._select_current_state(now)
         if data is None:
             yield event.plain_result("今天的状态尚未生成，正在生成...")
-            data = await self.generator.generate(target_date)
-
-        if not data or data.status == "failed":
-            yield event.plain_result("状态生成失败，请稍后再试或使用 /dls regen 重试。")
-            return
+            result = await self.generator.generate(target_date)
+            if not result.succeeded or result.state is None:
+                if result.auto_retries_exhausted:
+                    yield event.plain_result(
+                        "今日自动生成次数已达上限，请使用 /dls regen 手动重试。"
+                    )
+                else:
+                    yield event.plain_result(
+                        "状态生成失败，请稍后再试或使用 /dls regen 重试。"
+                    )
+                return
+            data = result.state
 
         if not data.timeline:
             yield event.plain_result("没有可用的时段状态。")
             return
 
-        # No argument: use the current local time.
+        # 无参数：使用当前本地时间。
         if not time_query:
             match = select_current_slot(data.timeline, minute_of_day(now))
             if match is None:
@@ -530,7 +541,7 @@ class DynamicLifeStatePlugin(Star):
             )
             return
 
-        # Natural slot: select the named slot directly.
+        # 自然时段：按名称直接选取。
         if time_query in NATURAL_SLOT_NAMES:
             match = find_slot_by_name(data.timeline, time_query)
             if match is None:
@@ -545,7 +556,7 @@ class DynamicLifeStatePlugin(Star):
             )
             return
 
-        # Explicit time: already validated before state access.
+        # 精确时间：已在访问状态前校验。
         query_minute = parse_clock_time(time_query)
         query_hour, query_minute_part = divmod(query_minute, 60)
         query_datetime = datetime.datetime.combine(
@@ -573,14 +584,14 @@ class DynamicLifeStatePlugin(Star):
         event: AstrMessageEvent,
         date: str = "",
     ) -> AsyncGenerator[object, None]:
-        """Show today's or an archived date's complete state.
+        """显示今天或某个归档日期的完整状态。
 
         Args:
-            event: Current AstrBot message event.
-            date: Optional natural date in YYYY-MM-DD format.
+            event: 当前 AstrBot 消息事件。
+            date: 可选的自然日期，格式 YYYY-MM-DD。
 
         Yields:
-            AstrBot plain-text command results.
+            AstrBot 纯文本命令结果。
         """
         now = self._now()
 
@@ -607,11 +618,16 @@ class DynamicLifeStatePlugin(Star):
                 yield event.plain_result("状态正在生成中，请稍后再试。")
                 return
             yield event.plain_result("今天的状态尚未生成，正在生成...")
-            data = await self.generator.generate(target_date)
-
-        if not data or data.status == "failed":
-            yield event.plain_result("当前暂无有效状态。")
-            return
+            result = await self.generator.generate(target_date)
+            if not result.succeeded or result.state is None:
+                if result.auto_retries_exhausted:
+                    yield event.plain_result(
+                        "今日自动生成次数已达上限，请使用 /dls regen 手动重试。"
+                    )
+                else:
+                    yield event.plain_result("当前暂无有效状态。")
+                return
+            data = result.state
 
         yield event.plain_result(self._format_full_state(data))
 
@@ -621,19 +637,19 @@ class DynamicLifeStatePlugin(Star):
         self,
         event: AstrMessageEvent,
     ) -> AsyncGenerator[object, None]:
-        """Force regeneration of today's state.
+        """强制重新生成今日状态。
 
         Args:
-            event: Current AstrBot message event, including trailing requirements.
+            event: 当前 AstrBot 消息事件，包含尾随的附加需求。
 
         Yields:
-            Generation progress and result messages.
+            生成进度和结果消息。
         """
         if self.generator.is_generating:
             yield event.plain_result("已有生成任务在进行中，请稍后再试。")
             return
 
-        # Preserve the full trailing requirement beyond command tokenization.
+        # 保留命令分词之外的完整附加需求。
         extra = _extract_args_after(event.message_str, "dls regen")
 
         now = self._now()
@@ -644,16 +660,22 @@ class DynamicLifeStatePlugin(Star):
         else:
             yield event.plain_result("正在强制重新生成今日状态...")
 
-        data = await self.generator.generate(
+        result = await self.generator.generate(
             target_date,
             force=True,
             extra=extra,
         )
 
-        if not data or data.status == "failed":
-            yield event.plain_result("状态生成失败，请稍后再试。")
+        if not result.succeeded or result.state is None:
+            if result.used_previous_state and result.state is not None:
+                yield event.plain_result(
+                    "重新生成失败，已保留原状态。\n\n"
+                    f"{self._format_full_state(result.state)}"
+                )
+            else:
+                yield event.plain_result("状态生成失败，请稍后再试。")
             return
 
         yield event.plain_result(
-            f"全局生活状态重新生成完成。\n\n{self._format_full_state(data)}"
+            f"全局生活状态重新生成完成。\n\n{self._format_full_state(result.state)}"
         )
