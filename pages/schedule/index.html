@@ -1,0 +1,161 @@
+<!doctype html>
+<html lang="zh-CN" data-theme="light">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <meta name="color-scheme" content="light dark" />
+    <meta name="description" content="查看并手动修改动态生活状态插件生成的每日日程。" />
+    <title>每日日程</title>
+    <link rel="stylesheet" href="./style.css" />
+  </head>
+  <body>
+    <div class="page">
+      <header class="hero">
+        <div class="hero__text">
+          <p class="eyebrow">DYNAMIC LIFE STATE</p>
+          <h1>每日日程</h1>
+          <p class="subtitle">
+            查看并手动修改 Bot 每天生成的生活状态。保存后，后续对话会立即使用修改后的日程进行注入。
+          </p>
+        </div>
+        <div class="hero__actions">
+          <button id="refreshBtn" class="btn btn--ghost" type="button">刷新</button>
+        </div>
+      </header>
+
+      <section class="toolbar" aria-label="日期与状态">
+        <div class="date-picker">
+          <button id="prevBtn" class="icon-btn" type="button" aria-label="前一天">‹</button>
+          <input id="dateInput" type="date" aria-label="选择日期" />
+          <button id="nextBtn" class="icon-btn" type="button" aria-label="后一天">›</button>
+          <button id="todayBtn" class="btn btn--ghost" type="button">今天</button>
+        </div>
+        <div id="statusPill" class="pill pill--muted">加载中…</div>
+      </section>
+
+      <div id="availableBar" class="chips" aria-label="已有日程的日期"></div>
+
+      <div id="globalError" class="alert alert--error" role="alert" hidden></div>
+      <div id="readonlyNotice" class="alert alert--info" hidden></div>
+
+      <main id="main">
+        <section id="loadingState" class="panel empty">
+          <div class="spinner" aria-hidden="true"></div>
+          <p>正在读取日程…</p>
+        </section>
+
+        <section id="emptyState" class="panel empty" hidden>
+          <div class="empty__mark" aria-hidden="true">🗓️</div>
+          <h2 id="emptyTitle">这一天还没有日程</h2>
+          <p id="emptyDesc"></p>
+        </section>
+
+        <section id="weatherPanel" class="panel weather-panel" hidden>
+          <div class="panel__head">
+            <div>
+              <p class="eyebrow">WEATHER</p>
+              <h2 id="weatherTitle">今日天气</h2>
+            </div>
+            <div class="weather-meta">
+              <span id="seasonBadge" class="season-badge"></span>
+              <span id="weatherSummary" class="meta"></span>
+              <button id="resetWeatherBtn" class="btn btn--ghost" type="button" hidden>恢复自动</button>
+              <button id="saveWeatherBtn" class="btn btn--primary" type="button" disabled>保存天气</button>
+            </div>
+          </div>
+          <div class="weather-table-wrap">
+            <table class="weather-table">
+              <thead>
+                <tr>
+                  <th>时段</th>
+                  <th>天气</th>
+                  <th>气温(℃)</th>
+                  <th>降水</th>
+                  <th>概率(%)</th>
+                  <th>风力</th>
+                </tr>
+              </thead>
+              <tbody id="weatherRows"></tbody>
+            </table>
+          </div>
+          <p id="weatherNote" class="hint"></p>
+          <datalist id="conditionOptions"></datalist>
+          <datalist id="precipitationOptions"></datalist>
+        </section>
+
+
+        <section id="editor" hidden>
+          <section class="panel summary-panel">
+            <div class="panel__head">
+              <div>
+                <p class="eyebrow">OVERVIEW</p>
+                <h2>当天概况</h2>
+              </div>
+              <div id="generatedMeta" class="meta"></div>
+            </div>
+            <div class="form-grid">
+              <label class="field field--small">
+                <span>节日</span>
+                <input id="holidayInput" type="text" maxlength="200" placeholder="无" />
+              </label>
+              <label class="field">
+                <span>今日概况</span>
+                <textarea id="summaryInput" rows="3" maxlength="4000" placeholder="当天整体日程的简短描述"></textarea>
+              </label>
+              <label class="field">
+                <span>今日氛围 / 穿搭风格</span>
+                <textarea id="styleInput" rows="3" maxlength="4000" placeholder="当天整体穿搭或氛围的简短描述"></textarea>
+              </label>
+            </div>
+          </section>
+
+
+          <section class="panel timeline-panel">
+            <div class="panel__head">
+              <div>
+                <p class="eyebrow">TIMELINE</p>
+                <h2>时间线</h2>
+              </div>
+              <div class="panel__actions">
+                <span id="entryCount" class="meta"></span>
+                <button id="addBtn" class="btn btn--primary" type="button">＋ 添加时段</button>
+              </div>
+            </div>
+            <p class="hint">
+              时间支持自然时段（凌晨、早上、上午、中午、下午、傍晚、晚上、深夜）或具体区间（如 08:00-09:00）。
+            </p>
+            <div id="timeline" class="timeline"></div>
+            <datalist id="slotOptions"></datalist>
+          </section>
+        </section>
+      </main>
+
+      <footer id="saveBar" class="savebar" hidden>
+        <div class="savebar__status">
+          <span id="dirtyDot" class="dot" aria-hidden="true"></span>
+          <span id="dirtyText">尚未修改</span>
+        </div>
+        <div class="savebar__actions">
+          <button id="resetBtn" class="btn btn--ghost" type="button">重置</button>
+          <button id="saveBtn" class="btn btn--primary" type="button">保存日程</button>
+        </div>
+      </footer>
+    </div>
+
+    <div id="toast" class="toast" role="status" aria-live="polite" hidden></div>
+
+    <div id="confirmDialog" class="modal" hidden>
+      <div class="modal__backdrop" data-confirm="cancel"></div>
+      <div class="modal__card" role="dialog" aria-modal="true" aria-labelledby="confirmTitle">
+        <h3 id="confirmTitle">确认操作</h3>
+        <p id="confirmMessage"></p>
+        <div class="modal__actions">
+          <button id="confirmCancel" class="btn btn--ghost" type="button">取消</button>
+          <button id="confirmOk" class="btn btn--primary" type="button">确定</button>
+        </div>
+      </div>
+    </div>
+
+    <script type="module" src="./app.js"></script>
+  </body>
+</html>

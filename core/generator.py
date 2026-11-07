@@ -19,6 +19,13 @@ from .state import (
     LifeState,
     TimelineEntry,
 )
+from .weather import (
+    DayWeather,
+    find_outfit_conflicts,
+    format_season_prompt,
+    format_weather_prompt,
+    generate_day_weather,
+)
 
 _SCHEMA_PATH = Path(__file__).resolve().parent.parent / "_conf_schema.json"
 _LEGACY_PROMPT_PLACEHOLDERS = (
@@ -92,10 +99,12 @@ class Generator:
         context: Context,
         config: AstrBotConfig,
         data_mgr: DataManager,
+        weather_store=None,
     ) -> None:
         self.context = context
         self.config = config
         self.data_mgr = data_mgr
+        self.weather_store = weather_store
         self._gen_lock = asyncio.Lock()
         # 按日期累计的非 force 生成失败次数；仅在内存中，插件重载后清零。
         self._auto_failures: dict[str, int] = {}
@@ -149,6 +158,10 @@ class Generator:
                 f"穿搭风格：{state.style_summary or '无'}",
                 "时间线：",
             ]
+            if state.season:
+                lines.append(f"季节：{state.season}")
+            if state.weather_summary:
+                lines.append(f"天气：{state.weather_summary}")
             for entry in state.timeline:
                 lines.extend(
                     [
@@ -240,6 +253,17 @@ class Generator:
                         f"country='CN', date={date}: {e}; using no holiday"
                     )
 
+                weather_day = None
+                if self.weather_store is not None:
+                    weather_day = self.weather_store.get(date)
+                if weather_day is None:
+                    weather_day = generate_day_weather(target_date)
+                logger.info(
+                    f"[DynamicLifeState] Weather generated for {date}: "
+                    f"season={weather_day.season.label}, "
+                    f"summary={weather_day.summary}"
+                )
+
             except Exception as e:
                 logger.error(
                     f"[DynamicLifeState] Generation preparation failed for "
@@ -253,8 +277,11 @@ class Generator:
 
             try:
                 persona = await self._get_persona()
+                template = self._get_prompt_template()
+                weather_text = format_weather_prompt(weather_day)
+                season_text = format_season_prompt(weather_day)
                 prompt = _render_template(
-                    self._get_prompt_template(),
+                    template,
                     date=date,
                     holiday=holiday,
                     persona=persona,
@@ -264,30 +291,96 @@ class Generator:
                         f"{name}（{spec['label']}）"
                         for name, spec in OPTIONAL_TIMELINE_FIELDS.items()
                     ),
+                    weather=weather_text,
+                    season=season_text,
                 )
-
-                if debug:
-                    logger.info(f"[DynamicLifeState] Generation prompt:\n{prompt}")
+                # 兼容旧版自定义提示词：没有天气 / 季节占位符时，强制追加
+                # 约束块，保证修改提示词的用户也能获得天气联动和季节穿搭。
+                if "{weather}" not in template:
+                    prompt += (
+                        "\n\n【今日天气（必须严格遵守）】\n" + weather_text
+                    )
+                if "{season}" not in template:
+                    prompt += (
+                        "\n\n【季节与穿搭（必须严格遵守）】\n" + season_text
+                    )
 
                 provider = await self._get_provider()
                 if not provider:
                     raise RuntimeError("No LLM provider is available")
 
-                sid = f"dynamic_life_state_gen_{date}"
-                resp = await provider.text_chat(prompt, session_id=sid)
-                text = self._extract_completion_text(resp)
+                state: LifeState | None = None
+                conflicts: list[tuple[TimelineEntry, str]] = []
+                conflict_note = ""
+                for attempt in range(2):
+                    attempt_prompt = prompt
+                    if conflict_note:
+                        attempt_prompt += (
+                            "\n\n【上一次生成的问题（必须修正）】\n" + conflict_note
+                        )
+                    if debug:
+                        logger.info(
+                            f"[DynamicLifeState] Generation prompt "
+                            f"attempt={attempt + 1}:\n{attempt_prompt}"
+                        )
 
-                if debug:
-                    logger.info(f"[DynamicLifeState] Raw model response:\n{text}")
+                    sid = f"dynamic_life_state_gen_{date}_{attempt}"
+                    resp = await provider.text_chat(attempt_prompt, session_id=sid)
+                    text = self._extract_completion_text(resp)
 
-                payload = self._extract_json(text)
-                generated_at = datetime.datetime.now(CHINA_TIMEZONE).isoformat()
-                state = self._validate_and_build(
-                    payload,
-                    target_date,
-                    generated_at,
-                    holiday,
-                )
+                    if debug:
+                        logger.info(
+                            f"[DynamicLifeState] Raw model response "
+                            f"attempt={attempt + 1}:\n{text}"
+                        )
+
+                    payload = self._extract_json(text)
+                    generated_at = datetime.datetime.now(CHINA_TIMEZONE).isoformat()
+                    state = self._validate_and_build(
+                        payload,
+                        target_date,
+                        generated_at,
+                        holiday,
+                        weather_day,
+                    )
+                    conflicts = find_outfit_conflicts(
+                        state.timeline,
+                        weather_day.season,
+                    )
+                    if not conflicts:
+                        break
+
+                    logger.warning(
+                        f"[DynamicLifeState] Season-incompatible outfit generated "
+                        f"for {date}: "
+                        + "、".join(
+                            f"{entry.time}={keyword}"
+                            for entry, keyword in conflicts
+                        )
+                    )
+                    conflict_note = (
+                        "以下时间段的穿搭与当前季节不符："
+                        + "、".join(
+                            f"{entry.time}（{keyword}）"
+                            for entry, keyword in conflicts
+                        )
+                        + f"。当前为{weather_day.season.label}，"
+                        + f"气温约{weather_day.low}~{weather_day.high}℃，"
+                        + "请重新生成完整 JSON，并确保所有时段穿搭符合季节，"
+                        + "不要出现与季节冲突的衣物。"
+                    )
+
+                if state is None:
+                    raise RuntimeError("The model returned no usable life state")
+                if conflicts:
+                    logger.warning(
+                        f"[DynamicLifeState] Season-incompatible outfit remains "
+                        f"after retry for {date}: "
+                        + "、".join(
+                            f"{entry.time}={keyword}"
+                            for entry, keyword in conflicts
+                        )
+                    )
 
             except Exception as e:
                 logger.error(f"[DynamicLifeState] Generation failed for {date}: {e}")
@@ -474,6 +567,7 @@ class Generator:
         target_date: datetime.date,
         generated_at: str,
         holiday: str,
+        weather: DayWeather,
     ) -> LifeState:
         """校验模型 JSON 并构建自然日期状态。
 
@@ -482,6 +576,7 @@ class Generator:
             target_date: 调用方请求的日期。
             generated_at: 实际生成完成的时间戳。
             holiday: 插件解析出的节日名称。
+            weather: 先生成的当天逐时段天气与季节上下文。
 
         Returns:
             校验后的生活状态。
@@ -522,6 +617,9 @@ class Generator:
             holiday=holiday,
             schedule_summary=str(payload.get("schedule_summary", "")),
             style_summary=str(payload.get("style_summary", "")),
+            weather_summary=weather.summary,
+            weather=list(weather.slots),
+            season=weather.season.label,
             timeline=entries,
             status="ok",
             generated_at=generated_at,
