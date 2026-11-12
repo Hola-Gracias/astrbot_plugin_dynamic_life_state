@@ -133,10 +133,7 @@ class WeatherSlot:
         if not isinstance(data, dict):
             return None
         time = data.get("time")
-        if (
-            not isinstance(time, str)
-            or time.strip() not in NATURAL_SLOT_RANGES
-        ):
+        if not isinstance(time, str) or time.strip() not in NATURAL_SLOT_RANGES:
             return None
         condition = data.get("condition")
         if not isinstance(condition, str) or not condition.strip():

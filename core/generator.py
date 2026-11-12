@@ -297,13 +297,9 @@ class Generator:
                 # 兼容旧版自定义提示词：没有天气 / 季节占位符时，强制追加
                 # 约束块，保证修改提示词的用户也能获得天气联动和季节穿搭。
                 if "{weather}" not in template:
-                    prompt += (
-                        "\n\n【今日天气（必须严格遵守）】\n" + weather_text
-                    )
+                    prompt += "\n\n【今日天气（必须严格遵守）】\n" + weather_text
                 if "{season}" not in template:
-                    prompt += (
-                        "\n\n【季节与穿搭（必须严格遵守）】\n" + season_text
-                    )
+                    prompt += "\n\n【季节与穿搭（必须严格遵守）】\n" + season_text
 
                 provider = await self._get_provider()
                 if not provider:
@@ -354,15 +350,13 @@ class Generator:
                         f"[DynamicLifeState] Season-incompatible outfit generated "
                         f"for {date}: "
                         + "、".join(
-                            f"{entry.time}={keyword}"
-                            for entry, keyword in conflicts
+                            f"{entry.time}={keyword}" for entry, keyword in conflicts
                         )
                     )
                     conflict_note = (
                         "以下时间段的穿搭与当前季节不符："
                         + "、".join(
-                            f"{entry.time}（{keyword}）"
-                            for entry, keyword in conflicts
+                            f"{entry.time}（{keyword}）" for entry, keyword in conflicts
                         )
                         + f"。当前为{weather_day.season.label}，"
                         + f"气温约{weather_day.low}~{weather_day.high}℃，"
@@ -377,8 +371,7 @@ class Generator:
                         f"[DynamicLifeState] Season-incompatible outfit remains "
                         f"after retry for {date}: "
                         + "、".join(
-                            f"{entry.time}={keyword}"
-                            for entry, keyword in conflicts
+                            f"{entry.time}={keyword}" for entry, keyword in conflicts
                         )
                     )
 

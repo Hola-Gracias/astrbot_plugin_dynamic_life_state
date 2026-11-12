@@ -53,6 +53,7 @@ const state = {
   payload: null,
   draft: null,
   dirty: false,
+  draftVersion: 0,
   loading: false,
   saving: false,
   optionalFields: [],
@@ -312,6 +313,7 @@ function markDirty() {
   if (!isEditable()) {
     return;
   }
+  state.draftVersion += 1;
   if (!state.dirty) {
     state.dirty = true;
     renderSaveBar();
@@ -375,13 +377,14 @@ function renderStatus() {
 
 function renderDateControls() {
   const maxDate = state.tomorrow || state.today || "";
+  const locked = state.loading || state.saving;
   els.dateInput.value = state.date || "";
   els.dateInput.max = maxDate;
-  els.prevBtn.disabled = state.loading || !state.date;
-  els.nextBtn.disabled =
-    state.loading || !state.date || !maxDate || state.date >= maxDate;
-  els.todayBtn.disabled = state.loading || !state.today || state.date === state.today;
-  els.refreshBtn.disabled = state.loading;
+  els.dateInput.disabled = locked;
+  els.prevBtn.disabled = locked || !state.date;
+  els.nextBtn.disabled = locked || !state.date || !maxDate || state.date >= maxDate;
+  els.todayBtn.disabled = locked || !state.today || state.date === state.today;
+  els.refreshBtn.disabled = locked;
 }
 
 function renderChips() {
@@ -882,8 +885,11 @@ async function save() {
     showToast(result.errors[0], true);
     return;
   }
+  const submittedVersion = state.draftVersion;
+  const submittedDate = state.draft.date;
   state.saving = true;
   renderSaveBar();
+  renderDateControls();
   try {
     const body = {
       date: state.draft.date,
@@ -903,27 +909,42 @@ async function save() {
       }),
     };
     const saved = await bridge.apiPost("schedule/save", body);
+    const unchanged =
+      Boolean(state.draft) &&
+      state.draft.date === submittedDate &&
+      state.draftVersion === submittedVersion;
     if (saved && saved.state) {
       state.payload.state = saved.state;
       state.payload.editable = true;
-      state.draft = normalizeDraft(saved.state);
       if (!state.weatherDirty && Array.isArray(saved.state.weather)) {
         state.weather = clone(saved.state.weather);
         state.weatherSummary = text(saved.state.weather_summary);
         state.season = text(saved.state.season);
         state.weatherSource = "state";
       }
+      if (unchanged) {
+        state.draft = normalizeDraft(saved.state);
+        state.invalid = new Map();
+        state.dirty = false;
+      } else {
+        state.dirty = true;
+      }
+    } else if (unchanged) {
+      state.dirty = false;
+      state.invalid = new Map();
     }
-    state.dirty = false;
-    state.invalid = new Map();
     showError("");
     render();
-    showToast((saved && saved.message) || "日程已保存。", false);
+    const message = unchanged
+      ? (saved && saved.message) || "日程已保存。"
+      : "日程已保存，但保存期间的新修改尚未提交，请再次保存。";
+    showToast(message, false);
   } catch (error) {
     showError(explainErrorMessage(error && error.message));
   } finally {
     state.saving = false;
     renderSaveBar();
+    renderDateControls();
   }
 }
 
@@ -936,7 +957,7 @@ function addEntry() {
     entry[field.key] = "";
   });
   state.draft.timeline.push(entry);
-  state.dirty = true;
+  markDirty();
   renderTimeline();
   renderSaveBar();
   const cards = els.timeline.querySelectorAll(".slot");
@@ -970,7 +991,7 @@ async function removeEntry(index) {
   }
   state.draft.timeline.splice(index, 1);
   state.invalid.delete(index);
-  state.dirty = true;
+  markDirty();
   renderTimeline();
   renderSaveBar();
 }
@@ -987,7 +1008,7 @@ function moveEntry(index, delta) {
   const temp = list[index];
   list[index] = list[target];
   list[target] = temp;
-  state.dirty = true;
+  markDirty();
   renderTimeline();
   renderSaveBar();
 }
@@ -1126,6 +1147,12 @@ async function resetWeather() {
 
 async function load(date, skipConfirm) {
   if (state.loading || !bridge) {
+    return;
+  }
+  if (state.saving) {
+    if (!skipConfirm) {
+      showToast("正在保存日程，请稍候再切换日期。", true);
+    }
     return;
   }
   if (

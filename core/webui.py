@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import datetime
+from dataclasses import replace
 from typing import Any
 
 from astrbot.api import logger
@@ -159,9 +160,7 @@ class SchedulePageApi:
             return
         try:
             registry[:] = [
-                item
-                for item in registry
-                if not self._is_own_registration(item)
+                item for item in registry if not self._is_own_registration(item)
             ]
         except Exception as exc:  # pragma: no cover - 依赖 AstrBot 内部结构
             logger.warning(
@@ -211,9 +210,7 @@ class SchedulePageApi:
     ) -> dict[str, Any]:
         """将状态转换为页面可直接渲染的字典。"""
         data = state.to_dict()
-        slots = list(
-            state.weather if weather_slots is None else weather_slots
-        )
+        slots = list(state.weather if weather_slots is None else weather_slots)
         data["weather"] = cls._serialize_weather(slots)
         for item, entry in zip(data["timeline"], state.timeline):
             intervals = resolve_entry_intervals(entry)
@@ -310,10 +307,7 @@ class SchedulePageApi:
             season = state.season
 
         editable = bool(
-            is_today
-            and state is not None
-            and state.status == "ok"
-            and not generating
+            is_today and state is not None and state.status == "ok" and not generating
         )
         weather_editable = bool((is_today or is_tomorrow) and not generating)
         return json_response(
@@ -336,9 +330,7 @@ class SchedulePageApi:
                 "weather_summary": weather_summary,
                 "season": season,
                 "weather_source": weather_source,
-                "weather_override": bool(
-                    store is not None and store.has(raw_date)
-                ),
+                "weather_override": bool(store is not None and store.has(raw_date)),
                 "available_dates": available_dates,
                 **self._page_metadata(),
             }
@@ -413,9 +405,7 @@ class SchedulePageApi:
         weather = list(current.weather)
         season = current.season
         override = (
-            self.weather_store.get(today)
-            if self.weather_store is not None
-            else None
+            self.weather_store.get(today) if self.weather_store is not None else None
         )
         if override is not None:
             weather_summary = override.summary
@@ -461,7 +451,6 @@ class SchedulePageApi:
                 **self._page_metadata(),
             }
         )
-
 
     def _weather_response(
         self,
@@ -545,18 +534,22 @@ class SchedulePageApi:
         if raw_date == today:
             current = data_mgr.get_current(today)
             if current is not None and current.status == "ok":
-                current.weather_summary = day.summary
-                current.weather = list(day.slots)
-                current.season = day.season.label
+                # 构造新状态再落盘，避免 DataManager.set() 回滚时指向已被修改的旧对象。
+                updated = replace(
+                    current,
+                    weather_summary=day.summary,
+                    weather=list(day.slots),
+                    season=day.season.label,
+                )
                 try:
-                    data_mgr.set(current)
+                    data_mgr.set(updated)
                 except Exception as exc:
                     logger.error(
                         "[DynamicLifeState] Failed to attach manual weather "
                         f"to today's state: {exc}"
                     )
                     return _error("天气已保存，但写入今天状态失败，请查看日志。")
-                state = current
+                state = updated
 
         logger.info(
             "[DynamicLifeState] Manual weather saved: "
@@ -614,18 +607,21 @@ class SchedulePageApi:
         if raw_date == today:
             current = data_mgr.get_current(today)
             if current is not None and current.status == "ok":
-                current.weather_summary = generated.summary
-                current.weather = list(generated.slots)
-                current.season = generated.season.label
+                # 同 save_weather：先构造新对象，失败时旧状态保持不变。
+                updated = replace(
+                    current,
+                    weather_summary=generated.summary,
+                    weather=list(generated.slots),
+                    season=generated.season.label,
+                )
                 try:
-                    data_mgr.set(current)
+                    data_mgr.set(updated)
                 except Exception as exc:
                     logger.error(
-                        "[DynamicLifeState] Failed to reset today's weather: "
-                        f"{exc}"
+                        f"[DynamicLifeState] Failed to reset today's weather: {exc}"
                     )
                     return _error("重置天气失败，请查看 AstrBot 日志。")
-                state = current
+                state = updated
 
         logger.info(
             "[DynamicLifeState] Manual weather reset: "

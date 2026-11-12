@@ -353,11 +353,7 @@ def _default_weather_slots(target_date: datetime.date) -> list[WeatherSlot]:
         dry_condition = "晴"
 
     fog_slots: set[str] = set()
-    if (
-        not wet
-        and month in (9, 10, 11, 12, 1, 2)
-        and rng.random() < 0.12
-    ):
+    if not wet and month in (9, 10, 11, 12, 1, 2) and rng.random() < 0.12:
         fog_slots = {"凌晨", "早上"}
 
     wind = _daily_wind(rng, wet=wet, month=month)
@@ -587,7 +583,9 @@ def weather_for_entry(
         if slot_range is None:
             continue
         overlap = sum(
-            max(0, min(interval.end, slot_range[1]) - max(interval.start, slot_range[0]))
+            max(
+                0, min(interval.end, slot_range[1]) - max(interval.start, slot_range[0])
+            )
             for interval in intervals
         )
         if overlap > best_overlap:
@@ -686,9 +684,7 @@ class WeatherOverrideStore:
         slots = [
             slot
             for slot in (
-                WeatherSlot.from_dict(item)
-                for item in raw
-                if isinstance(item, dict)
+                WeatherSlot.from_dict(item) for item in raw if isinstance(item, dict)
             )
             if slot is not None
         ]
@@ -716,17 +712,33 @@ class WeatherOverrideStore:
         """
         parsed = datetime.date.fromisoformat(date)
         normalized = normalize_weather_slots(parsed, slots)
-        self._data[date] = [slot.to_dict() for slot in normalized]
+        previous = self._data
+        updated = dict(previous)
+        updated[date] = [slot.to_dict() for slot in normalized]
+        self._data = updated
         self._prune(_today())
-        self.save()
+        try:
+            self.save()
+        except Exception:
+            # 写盘失败时恢复旧内存值，避免生成器读到未成功保存的天气。
+            self._data = previous
+            raise
         return generate_day_weather(parsed, normalized)
 
     def remove(self, date: str) -> bool:
         """删除指定日期的手动天气覆写。"""
         if date not in self._data:
             return False
-        del self._data[date]
-        self.save()
+        previous = self._data
+        updated = dict(previous)
+        del updated[date]
+        self._data = updated
+        try:
+            self.save()
+        except Exception:
+            # 写盘失败时恢复旧内存值，保持内存与磁盘一致。
+            self._data = previous
+            raise
         return True
 
     def _prune(self, today: datetime.date) -> bool:
