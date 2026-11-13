@@ -34,6 +34,16 @@ from .core.state import (
     resolve_entry_intervals,
     select_current_slot,
 )
+from .core.webui import SchedulePageApi
+from .core.weather import (
+    WeatherOverrideStore,
+    condition_icon,
+    format_weather_detail,
+    format_weather_short,
+    weather_for_entry,
+)
+
+PLUGIN_NAME = "astrbot_plugin_dynamic_life_state"
 
 
 def _extract_args_after(message_str: str, command: str) -> str | None:
@@ -64,14 +74,27 @@ class DynamicLifeStatePlugin(Star):
         self.state_file = self.data_dir / "life_state.json"
 
     async def initialize(self) -> None:
-        """初始化存储、生成器和午夜定时调度。"""
+        """初始化存储、生成器、WebUI 日程页和午夜定时调度。"""
         self.data_mgr = DataManager(self.state_file)
-        self.generator = Generator(self.context, self.config, self.data_mgr)
+        self.weather_store = WeatherOverrideStore(
+            self.data_dir / "weather_overrides.json"
+        )
+        self.generator = Generator(
+            self.context,
+            self.config,
+            self.data_mgr,
+            self.weather_store,
+        )
+        self.schedule_page_api = SchedulePageApi(self, plugin_name=PLUGIN_NAME)
+        self.schedule_page_api.register()
         self._start_scheduler()
 
     async def terminate(self) -> None:
-        """停止午夜定时调度。"""
+        """停止午夜定时调度并注销 WebUI 日程页接口。"""
         self._stop_scheduler()
+        schedule_page_api = getattr(self, "schedule_page_api", None)
+        if schedule_page_api is not None:
+            schedule_page_api.unregister()
 
     # =========================
     # Scheduler
@@ -399,6 +422,16 @@ class DynamicLifeStatePlugin(Star):
             f"📅 日期：{state.date}",
             f"🎉 节日：{state.holiday}",
         ]
+        if state.season:
+            lines.append(f"🍂 季节：{state.season}")
+        if state.weather_summary:
+            lines.append(f"🌤️ 今日天气：{state.weather_summary}")
+        current_weather = weather_for_entry(state.weather, match.entry)
+        if current_weather is not None:
+            lines.append(
+                f"{condition_icon(current_weather.condition)} 时段天气："
+                f"{format_weather_detail(current_weather)}"
+            )
         if current_datetime is not None:
             datetime_label = "当前日期时间" if show_current else "日期时间"
             lines.append(f"🗓️ {datetime_label}：{format_datetime(current_datetime)}")
@@ -432,18 +465,32 @@ class DynamicLifeStatePlugin(Star):
         lines = [
             f"📅 日期：{state.date}",
             f"🎉 节日：{state.holiday}",
-            f"📝 今日概况：{state.schedule_summary or '无'}",
-            f"🎨 今日氛围：{state.style_summary or '无'}",
-            f"⏰ 实际生成时间：{state.generated_at or '未知'}",
-            "",
-            "📋 完整时间线：",
         ]
+        if state.season:
+            lines.append(f"🍂 季节：{state.season}")
+        if state.weather_summary:
+            lines.append(f"🌤️ 今日天气：{state.weather_summary}")
+        lines.extend(
+            [
+                f"📝 今日概况：{state.schedule_summary or '无'}",
+                f"🎨 今日氛围：{state.style_summary or '无'}",
+                f"⏰ 实际生成时间：{state.generated_at or '未知'}",
+                "",
+                "📋 完整时间线：",
+            ]
+        )
         for entry in state.timeline:
             intervals = resolve_entry_intervals(entry)
             interval_text = "、".join(format_interval(item) for item in intervals)
+            entry_weather = weather_for_entry(state.weather, entry)
+            weather_text = (
+                f" | {format_weather_short(entry_weather)}"
+                if entry_weather is not None
+                else ""
+            )
             lines.append(
                 f"  [{entry.time}] {interval_text or '无法解析'} | "
-                f"{entry.schedule} | 👗 {entry.outfit}"
+                f"{entry.schedule} | 👗 {entry.outfit}{weather_text}"
             )
             details = []
             for key, spec in OPTIONAL_TIMELINE_FIELDS.items():

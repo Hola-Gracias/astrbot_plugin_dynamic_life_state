@@ -106,11 +106,94 @@ class TimelineEntry:
 
 
 @dataclass(slots=True)
+class WeatherSlot:
+    """某个自然时段内的天气。
+
+    time 必须来自 NATURAL_SLOT_RANGES 的自然时段名称；天气由插件内置
+    季节模型生成，不依赖 LLM。
+    """
+
+    time: str
+    condition: str
+    temperature: int
+    precipitation: str = "无"
+    precipitation_probability: int = 0
+    wind: str = ""
+
+    @classmethod
+    def from_dict(cls, data: object) -> "WeatherSlot | None":
+        """从持久化数据或接口数据创建天气时段。
+
+        Args:
+            data: 原始天气时段映射。
+
+        Returns:
+            规范化后的天气时段；字段无效时返回 None。
+        """
+        if not isinstance(data, dict):
+            return None
+        time = data.get("time")
+        if not isinstance(time, str) or time.strip() not in NATURAL_SLOT_RANGES:
+            return None
+        condition = data.get("condition")
+        if not isinstance(condition, str) or not condition.strip():
+            return None
+        raw_temperature = data.get("temperature")
+        if isinstance(raw_temperature, bool):
+            return None
+        try:
+            temperature = int(raw_temperature)
+        except (TypeError, ValueError):
+            return None
+        if not -50 <= temperature <= 60:
+            return None
+        precipitation = data.get("precipitation", "无")
+        if not isinstance(precipitation, str):
+            precipitation = "无"
+        raw_probability = data.get("precipitation_probability", 0)
+        if isinstance(raw_probability, bool):
+            raw_probability = 0
+        try:
+            probability = int(raw_probability)
+        except (TypeError, ValueError):
+            probability = 0
+        wind = data.get("wind", "")
+        if not isinstance(wind, str):
+            wind = ""
+        return cls(
+            time=time.strip(),
+            condition=condition.strip()[:20],
+            temperature=temperature,
+            precipitation=precipitation.strip()[:20] or "无",
+            precipitation_probability=max(0, min(100, probability)),
+            wind=wind.strip()[:40],
+        )
+
+    def to_dict(self) -> dict:
+        """序列化为 JSON 兼容映射。
+
+        Returns:
+            扁平的天气时段映射。
+        """
+        return {
+            "time": self.time,
+            "condition": self.condition,
+            "temperature": self.temperature,
+            "precipitation": self.precipitation,
+            "precipitation_probability": self.precipitation_probability,
+            "wind": self.wind,
+        }
+
+
+@dataclass(slots=True)
 class LifeState:
     date: str  # YYYY-MM-DD
     holiday: str = "无"
     schedule_summary: str = ""
     style_summary: str = ""
+    weather_summary: str = ""
+    weather: list[WeatherSlot] = field(default_factory=list)
+    season: str = ""
     timeline: list[TimelineEntry] = field(default_factory=list)
     status: str = "ok"  # "ok" | "failed"
     generated_at: str = ""  # ISO timestamp
@@ -146,6 +229,18 @@ class LifeState:
             )
             if entry is not None
         ]
+        weather_raw = data.get("weather", [])
+        if not isinstance(weather_raw, list):
+            weather_raw = []
+        weather = [
+            slot
+            for slot in (
+                WeatherSlot.from_dict(item)
+                for item in weather_raw
+                if isinstance(item, dict)
+            )
+            if slot is not None
+        ]
         status = str(data.get("status", "ok"))
         if status == "ok" and not timeline:
             raise ValueError("status is ok but the timeline has no valid entries")
@@ -158,6 +253,9 @@ class LifeState:
             ),
             schedule_summary=str(data.get("schedule_summary", "")),
             style_summary=str(data.get("style_summary", "")),
+            weather_summary=str(data.get("weather_summary", "")),
+            weather=weather,
+            season=str(data.get("season", "")),
             timeline=timeline,
             status=status,
             generated_at=str(data.get("generated_at", "")),
@@ -174,6 +272,9 @@ class LifeState:
             "holiday": self.holiday,
             "schedule_summary": self.schedule_summary,
             "style_summary": self.style_summary,
+            "weather_summary": self.weather_summary,
+            "weather": [slot.to_dict() for slot in self.weather],
+            "season": self.season,
             "timeline": [entry.to_dict() for entry in self.timeline],
             "status": self.status,
             "generated_at": self.generated_at,
@@ -273,6 +374,31 @@ class DataManager:
         if self._data is not None and self._data.date == date:
             return self._data
         return self._load_path(self._history_path(date))
+
+    def list_available_dates(self) -> list[str]:
+        """返回当前与归档中所有有效状态的日期。
+
+        Returns:
+            从新到旧排列的 YYYY-MM-DD 日期字符串列表。
+        """
+        dates: set[str] = set()
+        if self._data is not None:
+            dates.add(self._data.date)
+        if self._history_dir.exists():
+            for path in self._history_dir.iterdir():
+                match = _HISTORY_FILE_RE.fullmatch(path.name)
+                if not match:
+                    continue
+                try:
+                    file_date = datetime.datetime.strptime(
+                        match.group(1), "%Y.%m.%d"
+                    ).date()
+                except ValueError:
+                    continue
+                state = self._load_path(path)
+                if state is not None and state.date == file_date.isoformat():
+                    dates.add(state.date)
+        return sorted(dates, reverse=True)
 
     def archive_before_generation(self, target_date: str) -> None:
         """归档属于不同日期的当前状态。
@@ -537,7 +663,7 @@ class DataManager:
 # Time-slot matching
 # =========================
 
-_NATURAL_SLOTS: dict[str, tuple[int, int]] = {
+NATURAL_SLOT_RANGES: dict[str, tuple[int, int]] = {
     "凌晨": (0, 6 * 60),
     "早上": (6 * 60, 9 * 60),
     "上午": (9 * 60, 12 * 60),
@@ -548,7 +674,9 @@ _NATURAL_SLOTS: dict[str, tuple[int, int]] = {
     "深夜": (23 * 60, 24 * 60),
 }
 
-NATURAL_SLOT_NAMES: tuple[str, ...] = tuple(_NATURAL_SLOTS.keys())
+# 内部旧名称保留为别名，避免影响已有匹配逻辑。
+_NATURAL_SLOTS = NATURAL_SLOT_RANGES
+NATURAL_SLOT_NAMES: tuple[str, ...] = tuple(NATURAL_SLOT_RANGES.keys())
 
 _TIME_RANGE_RE = re.compile(r"(\d{1,2}):(\d{2})\s*[-–—~]\s*(\d{1,2}):(\d{2})")
 _CLOCK_TIME_RE = re.compile(r"(\d{2}):(\d{2})")

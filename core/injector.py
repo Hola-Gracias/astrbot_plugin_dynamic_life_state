@@ -8,6 +8,12 @@ from .state import (
     format_datetime,
     format_interval,
 )
+from .weather import (
+    condition_icon,
+    format_weather_detail,
+    weather_at_minute,
+    weather_for_entry,
+)
 
 # Fake tool-call constants
 FAKE_TOOL_CALL_NAME = "get_current_life_state"
@@ -38,7 +44,9 @@ def build_injection_text(
     schedule_label = "无"
     outfit_label = "无"
     interval_label = "无"
+    weather_label = "无"
     optional_labels: list[str] = []
+    current_weather = None
     if current_match:
         slot_label = current_match.entry.time
         schedule_label = current_match.entry.schedule
@@ -49,6 +57,17 @@ def build_injection_text(
                 optional_labels.append(f"当前{spec['label']}: {value}\n")
         if current_match.active_interval:
             interval_label = format_interval(current_match.active_interval)
+        current_weather = weather_for_entry(state.weather, current_match.entry)
+    if current_weather is None:
+        current_weather = weather_at_minute(
+            state.weather,
+            now.hour * 60 + now.minute,
+        )
+    if current_weather is not None:
+        weather_label = (
+            f"{condition_icon(current_weather.condition)} "
+            f"{format_weather_detail(current_weather)}"
+        )
 
     return (
         f"<life_state>\n"
@@ -59,6 +78,9 @@ def build_injection_text(
         f"当前日期时间: {format_datetime(now)}\n"
         f"今日概况: {state.schedule_summary or '无'}\n"
         f"今日氛围: {state.style_summary or '无'}\n"
+        f"今日季节: {state.season or '无'}\n"
+        f"今日天气: {state.weather_summary or '无'}\n"
+        f"当前天气: {weather_label}\n"
         f"当前时段: {slot_label}\n"
         f"当前时段范围: {interval_label}\n"
         f"当前安排: {schedule_label}\n"
